@@ -20,9 +20,9 @@ logger = get_logger(__name__)
 class ResumeData:
     name: str = ""
     phone: str = ""
-    city: str = ""
     age: str = ""
     positions: str = ""
+    source: str = ""
     source_file: str = ""
     parsed_at: str = ""
 
@@ -54,36 +54,6 @@ _SECTION_HEADERS: frozenset[str] = frozenset({
 })
 
 # Labels that appear before the value with a tab or colon
-
-# Current residence city — "місто роботи" is explicitly excluded via negative lookahead.
-_CURRENT_CITY_LABELS = re.compile(
-    r"(?:місто\s+проживання|місто(?!\s+роботи)|city|location)\s*:?\t?(.+)",
-    re.IGNORECASE,
-)
-
-# Target / desired work city.
-# Covers both label-value ("Готовий працювати: Вінниця") and
-# phrase ("Готовий працювати у Вінниці") forms in one pattern.
-_TARGET_CITY_LABELS = re.compile(
-    r"(?:"
-    r"місто\s+роботи"
-    r"|бажане\s+місто"
-    r"|бажаний\s+регіон"
-    r"|desired\s+(?:work\s+)?(?:city|location)"
-    r"|work\s+(?:city|location)"
-    r"|preferred\s+(?:city|location)"
-    # "Готовий/Готова/Готові працювати", "до переїзду", "до роботи"
-    r"|готов(?:ий|а|і)?\s+(?:до\s+)?(?:переїзд[уі]|роботи|працювати)"
-    r")\s*:?\t?\s*(.+)",
-    re.IGNORECASE,
-)
-
-# Fallback phrase form without a colon separator:
-# "Готова/Готовий працювати у Вінниці", "Готова до переїзду у Харків".
-_READY_TO_WORK_PHRASE = re.compile(
-    r"готов(?:ий|а|і)?\s+(?:до\s+)?(?:переїзд[уі]|роботи|працювати)\s+(?:в|у)\s+(.+)",
-    re.IGNORECASE,
-)
 _PHONE_LABELS = re.compile(
     r"(?:телефон|phone|мобільний|tel\.?)\s*:?\t?(.+)",
     re.IGNORECASE,
@@ -132,51 +102,25 @@ _PHONE_RAW = re.compile(
     r"(?:\+?380|0)[\s\-]?(\d{2})[\s\-]?(\d{3})[\s\-]?(\d{2})[\s\-]?(\d{2})"
 )
 
-# Known Ukrainian cities for fallback city detection
-_UA_CITIES: frozenset[str] = frozenset({
-    "київ", "kyiv", "харків", "одеса", "дніпро", "запоріжжя", "львів",
-    "кривий ріг", "миколаїв", "маріуполь", "луганськ", "вінниця",
-    "херсон", "полтава", "чернігів", "черкаси", "суми", "житомир",
-    "рівне", "івано-франківськ", "тернопіль", "хмельницький", "ужгород",
-    "луцьк", "чернівці", "кропивницький", "турбів", "бровари",
-})
-
-# Locative / dative / accusative → nominative for common Ukrainian cities.
-# Used to normalize city names extracted from phrases like "у Вінниці".
-_UA_CITY_LOCATIVE: dict[str, str] = {
-    "вінниці": "Вінниця",   "вінницю": "Вінниця",
-    "одесі": "Одеса",       "одесу": "Одеса",
-    "полтаві": "Полтава",   "полтаву": "Полтава",
-    "черкасах": "Черкаси",
-    "сумах": "Суми",
-    "чернівцях": "Чернівці",
-    "харкові": "Харків",
-    "дніпрі": "Дніпро",    "дніпрові": "Дніпро",
-    "києві": "Київ",        "києву": "Київ",
-    "львові": "Львів",
-    "запоріжжі": "Запоріжжя",
-    "херсоні": "Херсон",
-    "миколаєві": "Миколаїв", "миколаєву": "Миколаїв",
-    "луганську": "Луганськ",
-    "маріуполі": "Маріуполь",
-    "луцьку": "Луцьк",
-    "рівному": "Рівне",     "рівні": "Рівне",
-    "тернополі": "Тернопіль",
-    "хмельницькому": "Хмельницький",
-    "ужгороді": "Ужгород",
-    "чернігові": "Чернігів", "чернігову": "Чернігів",
-    "житомирі": "Житомир",
-    "кропивницькому": "Кропивницький",
-    "броварах": "Бровари",
-    "турбові": "Турбів",
-    "кривому розі": "Кривий Ріг",
-    "івано-франківську": "Івано-Франківськ",
-}
-
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+def _detect_source(path: Path) -> str:
+    """Infer the job-platform source from the filename and extension."""
+    name_lower = path.name.lower()
+    suffix = path.suffix.lower()
+    if "robota" in name_lower or suffix in (".mhtml", ".mht"):
+        return "robota.ua"
+    if "work" in name_lower:
+        return "work.ua"
+    if "hh" in name_lower:
+        return "hh.ua"
+    if "linkedin" in name_lower:
+        return "LinkedIn"
+    return ""
+
 
 def _normalize_phone(raw: str) -> str:
     """Normalize any Ukrainian phone number to +38 0XX XXX-XX-XX format."""
@@ -195,48 +139,6 @@ def _normalize_phone(raw: str) -> str:
     # Return stripped original if we cannot normalize
     return raw.strip()
 
-
-def _normalize_city_name(raw: str) -> str:
-    """
-    Normalize a city name to nominative form.
-
-    Handles:
-    - Leading prepositions: "у Вінниці" → "Вінниці" → "Вінниця"
-    - Locative/dative/accusative inflections via _UA_CITY_LOCATIVE lookup
-    - Already-nominative names present in _UA_CITIES
-    - Unknown cities returned as-is (cleaned)
-    """
-    cleaned = raw.strip().strip(",.;:")
-    # Strip leading Ukrainian prepositions "у"/"в" before the city name.
-    cleaned = re.sub(r"^(?:у|в)\s+", "", cleaned, flags=re.IGNORECASE).strip()
-    lower = cleaned.lower()
-    if lower in _UA_CITY_LOCATIVE:
-        return _UA_CITY_LOCATIVE[lower]
-    if lower in _UA_CITIES:
-        return cleaned.capitalize()
-    return cleaned
-
-
-def _format_city_field(current_city: str, target_city: str) -> str:
-    """
-    Compose the final city field from residence and target work location.
-
-    target_city is the primary (job-target) value.
-    current_city is shown in brackets as secondary context.
-
-      Both present, different → "TargetCity (CurrentCity)"
-      Both present, same      → "TargetCity"
-      Only one present        → that value alone
-    """
-    current = current_city.strip()
-    target = target_city.strip()
-    if not current and not target:
-        return ""
-    if not target:
-        return current
-    if not current or current.lower() == target.lower():
-        return target
-    return f"{target} ({current})"
 
 
 def _extract_name_from_block(text: str) -> str:
@@ -350,6 +252,7 @@ def extract_resume(path: Path) -> ResumeData:
     Never raises — on any error returns a partially-filled ResumeData.
     """
     result = ResumeData(
+        source=_detect_source(path),
         source_file=path.name,
         parsed_at=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
     )
@@ -413,45 +316,6 @@ def extract_resume(path: Path) -> ResumeData:
                 result.phone = _normalize_phone(line)
                 break
 
-    # --- City ---
-    current_city = ""
-    target_city = ""
-
-    for line in all_lines:
-        if not current_city:
-            m = _CURRENT_CITY_LABELS.match(line)
-            if m:
-                current_city = m.group(1).strip()
-                logger.debug("City | current matched line=%r → %r", line, current_city)
-        if not target_city:
-            m = _TARGET_CITY_LABELS.match(line)
-            if m:
-                target_city = _normalize_city_name(m.group(1))
-                logger.debug("City | target matched line=%r → %r", line, target_city)
-        if not target_city:
-            m = _READY_TO_WORK_PHRASE.match(line)
-            if m:
-                target_city = _normalize_city_name(m.group(1))
-                logger.debug("City | ready-to-work phrase line=%r → %r", line, target_city)
-
-    # Fallback: scan for a known city name to use as current residence.
-    if not current_city:
-        for line in all_lines:
-            lower = line.lower()
-            for city in _UA_CITIES:
-                if city in lower:
-                    current_city = city.capitalize()
-                    logger.debug("City | fallback scan line=%r → %r", line, current_city)
-                    break
-            if current_city:
-                break
-
-    logger.debug(
-        "City | file=%s  current_city=%r  target_city=%r",
-        path.name, current_city, target_city,
-    )
-    result.city = _format_city_field(current_city, target_city)
-
     # --- Age ---
     for line in all_lines:
         m_label = _AGE_LABELS.match(line)
@@ -489,7 +353,7 @@ def extract_resume(path: Path) -> ResumeData:
             logger.warning("Position extraction failed for %s: %s", path.name, exc)
 
     logger.info(
-        "Extracted | file=%s name=%r phone=%r city=%r age=%r",
-        path.name, result.name, result.phone, result.city, result.age,
+        "Extracted | file=%s name=%r phone=%r age=%r source=%r",
+        path.name, result.name, result.phone, result.age, result.source,
     )
     return result
