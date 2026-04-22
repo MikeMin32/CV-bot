@@ -12,12 +12,11 @@ from services.resume_extractor import ResumeData
 logger = get_logger(__name__)
 
 COLUMNS: list[str] = [
-    "Ім'я",
-    "Телефон",
-    "Місто",
+    "Посада",
+    "ПІБ",
     "Вік",
-    "Посади",
-    "Дата обробки",
+    "Джерело",
+    "Номер телефону",
 ]
 
 # Header styling
@@ -27,12 +26,11 @@ _HEADER_ALIGN = Alignment(horizontal="center", vertical="center", wrap_text=True
 
 # Minimum column widths (characters)
 _MIN_COL_WIDTHS: dict[str, int] = {
-    "Ім'я": 28,
-    "Телефон": 20,
-    "Місто": 16,
+    "Посада": 45,
+    "ПІБ": 28,
     "Вік": 8,
-    "Посади": 45,
-    "Дата обробки": 20,
+    "Джерело": 16,
+    "Номер телефону": 22,
 }
 
 
@@ -64,12 +62,11 @@ def build_excel(resumes: list[ResumeData], output_path: Path) -> None:
     row_values: dict[str, list[str]] = {col: [] for col in COLUMNS}
     for row_idx, resume in enumerate(resumes, start=2):
         values = [
-            resume.name,
-            resume.phone,
-            resume.city,
-            resume.age,
             resume.positions,
-            resume.parsed_at,
+            resume.name,
+            resume.age,
+            resume.source,
+            resume.phone,
         ]
         for col_idx, value in enumerate(values, start=1):
             cell = ws.cell(row=row_idx, column=col_idx, value=value)
