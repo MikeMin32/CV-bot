@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
 from core.logging import get_logger
@@ -18,6 +18,7 @@ logger = get_logger(__name__)
 
 @dataclass
 class ResumeData:
+    publication_date: datetime | None = None
     name: str = ""
     phone: str = ""
     age: str = ""
@@ -101,6 +102,72 @@ _AGE_BARE = re.compile(r"^(\d{1,3})$")
 _PHONE_RAW = re.compile(
     r"(?:\+?380|0)[\s\-]?(\d{2})[\s\-]?(\d{3})[\s\-]?(\d{2})[\s\-]?(\d{2})"
 )
+
+# ---------------------------------------------------------------------------
+# Date parsing
+# ---------------------------------------------------------------------------
+
+_UA_MONTHS: dict[str, int] = {
+    # genitive (used in "16 квітня 2026 року" and "Резюме від 24 грудня 2025")
+    "січня": 1, "лютого": 2, "березня": 3, "квітня": 4,
+    "травня": 5, "червня": 6, "липня": 7, "серпня": 8,
+    "вересня": 9, "жовтня": 10, "листопада": 11, "грудня": 12,
+    # nominative (fallback)
+    "січень": 1, "лютий": 2, "березень": 3, "квітень": 4,
+    "травень": 5, "червень": 6, "липень": 7, "серпень": 8,
+    "вересень": 9, "жовтень": 10, "листопад": 11, "грудень": 12,
+}
+
+_UA_DATE_RE = re.compile(
+    r"(\d{1,2})\s+"
+    r"(січня|лютого|березня|квітня|травня|червня|липня|серпня|вересня|жовтня|листопада|грудня"
+    r"|січень|лютий|березень|квітень|травень|червень|липень|серпень|вересень|жовтень|листопад|грудень)"
+    r"\s+(\d{4})",
+    re.IGNORECASE,
+)
+
+# Matches relative MHTML dates like "2 дні тому", "1 місяць тому", "13 годин тому"
+_RELATIVE_DATE_RE = re.compile(
+    r"(\d+)\s+(годин(?:и)?|година|день|дні|днів|тиждень|тижні|тижнів|місяць|місяці|місяців)\s+тому",
+    re.IGNORECASE,
+)
+
+
+def _parse_ua_date(text: str) -> datetime | None:
+    """Parse 'DD місяць YYYY' from any text string."""
+    m = _UA_DATE_RE.search(text)
+    if not m:
+        return None
+    try:
+        day = int(m.group(1))
+        month = _UA_MONTHS.get(m.group(2).lower())
+        year = int(m.group(3))
+        if not month:
+            return None
+        return datetime(year, month, day)
+    except ValueError:
+        return None
+
+
+def _resolve_relative_date(raw: str, reference: datetime) -> datetime | None:
+    """Convert a relative Ukrainian date string to an absolute datetime."""
+    normalized = re.sub(r"\s+", " ", raw).strip()
+    m = _RELATIVE_DATE_RE.match(normalized)
+    if not m:
+        return None
+    n, unit = int(m.group(1)), m.group(2).lower()
+    if unit.startswith("год") or unit == "година":
+        delta = timedelta(hours=n)
+    elif unit in ("день", "дні", "днів"):
+        delta = timedelta(days=n)
+    elif unit.startswith("тиж"):
+        delta = timedelta(weeks=n)
+    elif unit.startswith("місяц"):
+        delta = timedelta(days=n * 30)
+    else:
+        return None
+    result = reference - delta
+    return result.replace(hour=0, minute=0, second=0, microsecond=0)
 
 
 # ---------------------------------------------------------------------------
@@ -398,8 +465,26 @@ def extract_resume(path: Path) -> ResumeData:
         except Exception as exc:
             logger.warning("Position extraction failed for %s: %s", path.name, exc)
 
+    # --- Publication date ---
+    if suffix in (".mhtml", ".mht") and doc.raw_date_hint:
+        try:
+            ref = datetime.fromtimestamp(path.stat().st_mtime)
+        except OSError:
+            ref = datetime.now()
+        result.publication_date = _resolve_relative_date(doc.raw_date_hint, ref)
+    else:
+        # For DOCX and PDF: scan the first 15 lines for a Ukrainian date.
+        # DOCX work.ua: "Резюме від 24 грудня 2025"
+        # PDF robota.ua: "16 квітня 2026 року" (appears near the top)
+        for line in all_lines[:15]:
+            d = _parse_ua_date(line)
+            if d:
+                result.publication_date = d
+                break
+
     logger.info(
-        "Extracted | file=%s name=%r phone=%r age=%r source=%r",
+        "Extracted | file=%s name=%r phone=%r age=%r source=%r date=%s",
         path.name, result.name, result.phone, result.age, result.source,
+        result.publication_date.strftime("%Y-%m-%d") if result.publication_date else "—",
     )
     return result

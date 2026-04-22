@@ -22,6 +22,8 @@ class ParsedDocument:
     blocks: list[TextBlock] = field(default_factory=list)
     # Flat joined text from tables (labels + values)
     table_lines: list[str] = field(default_factory=list)
+    # Raw date hint extracted by parsers (e.g. "2 дні тому", "16 квітня 2026 року")
+    raw_date_hint: str = ""
 
     @property
     def all_lines(self) -> list[str]:

@@ -51,6 +51,14 @@ _UI_NOISE = frozenset({
 # Separates the candidate section from the "similar resumes" section
 _SIMILAR_SECTION = "Резюме, схожі на вибране"
 
+# Matches the main candidate's "Оновлено X тому" update line.
+# This element uses the unique `santa-mt-10` class which only appears on the
+# candidate's own card, unlike similar-resume cards that use `santa-mr-20`.
+_MAIN_UPDATE = re.compile(
+    r'santa-mt-10[^>]*>\s*Оновлено\s+(.*?)(?:<!--|</p>)',
+    re.DOTALL,
+)
+
 
 def parse_mhtml(path: Path) -> ParsedDocument:
     """
@@ -101,7 +109,14 @@ def parse_mhtml(path: Path) -> ParsedDocument:
         if line and len(line) > 2:
             blocks.append(TextBlock(text=line, style="Normal"))
 
-    return ParsedDocument(blocks=blocks)
+    # ── Publication date (relative) ───────────────────────────────────────
+    # Search the full HTML so the main candidate's date is always found.
+    raw_date_hint = ""
+    date_m = _MAIN_UPDATE.search(html)
+    if date_m:
+        raw_date_hint = re.sub(r"\s+", " ", date_m.group(1)).strip()
+
+    return ParsedDocument(blocks=blocks, raw_date_hint=raw_date_hint)
 
 
 # ---------------------------------------------------------------------------
