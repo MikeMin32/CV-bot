@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime
 from pathlib import Path
 
 from openpyxl import Workbook
@@ -12,6 +13,7 @@ from services.resume_extractor import ResumeData
 logger = get_logger(__name__)
 
 COLUMNS: list[str] = [
+    "Дата публікації",
     "Посада",
     "ПІБ",
     "Вік",
@@ -26,12 +28,15 @@ _HEADER_ALIGN = Alignment(horizontal="center", vertical="center", wrap_text=True
 
 # Minimum column widths (characters)
 _MIN_COL_WIDTHS: dict[str, int] = {
+    "Дата публікації": 18,
     "Посада": 45,
     "ПІБ": 28,
     "Вік": 8,
     "Джерело": 16,
     "Номер телефону": 22,
 }
+
+_DATE_SENTINEL = datetime.min
 
 
 def _auto_fit_column(ws, col_idx: int, header: str, values: list[str]) -> None:
@@ -44,7 +49,14 @@ def _auto_fit_column(ws, col_idx: int, header: str, values: list[str]) -> None:
 
 
 def build_excel(resumes: list[ResumeData], output_path: Path) -> None:
-    """Write a list of ResumeData objects to an .xlsx file."""
+    """Write a list of ResumeData objects to an .xlsx file, sorted oldest-first."""
+    # Sort: resumes with a known date come first (oldest → newest);
+    # resumes without a date are appended at the end.
+    sorted_resumes = sorted(
+        resumes,
+        key=lambda r: (r.publication_date is None, r.publication_date or _DATE_SENTINEL),
+    )
+
     wb = Workbook()
     ws = wb.active
     ws.title = "Candidates"
@@ -60,8 +72,14 @@ def build_excel(resumes: list[ResumeData], output_path: Path) -> None:
 
     # Write data rows
     row_values: dict[str, list[str]] = {col: [] for col in COLUMNS}
-    for row_idx, resume in enumerate(resumes, start=2):
+    for row_idx, resume in enumerate(sorted_resumes, start=2):
+        date_str = (
+            resume.publication_date.strftime("%d.%m.%Y")
+            if resume.publication_date
+            else ""
+        )
         values = [
+            date_str,
             resume.positions,
             resume.name,
             resume.age,
@@ -79,4 +97,4 @@ def build_excel(resumes: list[ResumeData], output_path: Path) -> None:
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     wb.save(str(output_path))
-    logger.info("Excel saved: %s (%d rows)", output_path, len(resumes))
+    logger.info("Excel saved: %s (%d rows)", output_path, len(sorted_resumes))
