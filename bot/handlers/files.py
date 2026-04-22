@@ -92,7 +92,7 @@ async def handle_finish(message: Message, bot: Bot) -> None:
 
     if not files:
         await message.answer(
-            "⚠️ Черга порожня. Спочатку надішліть файли у форматі <code>.docx</code>, <code>.pdf</code> або <code>.mhtml</code>.",
+            "⚠️ Очередь пуста. Сначала отправьте файлы в формате <code>.docx</code>, <code>.pdf</code> или <code>.mhtml</code>.",
             parse_mode="HTML",
         )
         return

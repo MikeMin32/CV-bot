@@ -9,8 +9,8 @@ from bot.keyboards.common import main_keyboard
 router = Router(name="start")
 
 _WELCOME_TEXT = (
-    "Відправте резюме у форматі <code>.docx</code>, <code>.pdf</code> або <code>.mhtml</code>, "
-    "і я витягну дані та сформую Excel-таблицю."
+    "Отправьте резюме в формате <code>.docx</code>, <code>.pdf</code> или <code>.mhtml</code>, "
+    "и я извлеку данные и сформирую Excel-таблицу."
 )
 
 
