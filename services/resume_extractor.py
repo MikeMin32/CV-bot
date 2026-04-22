@@ -123,18 +123,12 @@ def _detect_source(path: Path) -> str:
 
 
 def _normalize_phone(raw: str) -> str:
-    """Normalize any Ukrainian phone number to +38 0XX XXX-XX-XX format."""
-    m = _PHONE_RAW.search(raw.replace("\xa0", "").replace(" ", "").replace("-", ""))
+    """Normalize any Ukrainian phone number to a plain digit string 380XXXXXXXXX."""
+    cleaned = re.sub(r"[\s\-\(\)\+]", "", raw.replace("\xa0", ""))
+    m = re.search(r"(?:380|0)(\d{9})", cleaned)
     if m:
-        # Groups already captured without separators — re-parse from cleaned string
-        pass
-
-    # Try again on the original with relaxed grouping
-    cleaned = re.sub(r"[\s\-\(\)]", "", raw.replace("\xa0", ""))
-    m2 = re.search(r"(?:\+?380|0)(\d{9})", cleaned)
-    if m2:
-        digits = m2.group(1)  # 9 digits after country/leading 0
-        return f"+38 0{digits[:2]} {digits[2:5]}-{digits[5:7]}-{digits[7:9]}"
+        digits = m.group(1)  # 9 digits after country/leading 0
+        return f"380{digits}"
 
     # Return stripped original if we cannot normalize
     return raw.strip()
