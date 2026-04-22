@@ -37,9 +37,10 @@ async def handle_document(message: Message, bot: Bot) -> None:
 
     # Validate extension
     file_name: str = doc.file_name or ""
-    if not file_name.lower().endswith(".docx"):
+    _ALLOWED = (".docx", ".pdf", ".mhtml", ".mht")
+    if not any(file_name.lower().endswith(ext) for ext in _ALLOWED):
         await message.answer(
-            "⚠️ Принимаются только файлы в формате <code>.docx</code>.",
+            "⚠️ Підтримувані формати: <code>.docx</code>, <code>.pdf</code>, <code>.mhtml</code>.",
             parse_mode="HTML",
         )
         return

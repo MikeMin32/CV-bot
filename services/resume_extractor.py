@@ -7,6 +7,8 @@ from pathlib import Path
 
 from core.logging import get_logger
 from services.docx_parser import ParsedDocument, TextBlock, parse_docx
+from services.pdf_parser import parse_pdf
+from services.mhtml_parser import parse_mhtml
 
 logger = get_logger(__name__)
 
@@ -328,9 +330,23 @@ def _collect_positions(blocks: list[TextBlock]) -> list[str]:
 # Main extractor
 # ---------------------------------------------------------------------------
 
+def _read_mhtml_position(blocks: list[TextBlock]) -> str:
+    """
+    If the first block has style Heading 1 and contains two lines,
+    the second line is the position title injected by the MHTML parser.
+    """
+    if not blocks:
+        return ""
+    first = blocks[0]
+    if first.style != "Heading 1":
+        return ""
+    lines = [l.strip() for l in first.text.splitlines() if l.strip()]
+    return lines[1] if len(lines) >= 2 else ""
+
+
 def extract_resume(path: Path) -> ResumeData:
     """
-    Parse a .docx file and extract structured resume fields.
+    Parse a resume file (.docx / .pdf / .mhtml) and extract structured fields.
     Never raises — on any error returns a partially-filled ResumeData.
     """
     result = ResumeData(
@@ -338,17 +354,33 @@ def extract_resume(path: Path) -> ResumeData:
         parsed_at=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
     )
 
+    suffix = path.suffix.lower()
     try:
-        doc = parse_docx(path)
+        if suffix == ".docx":
+            doc = parse_docx(path)
+        elif suffix == ".pdf":
+            doc = parse_pdf(path)
+        elif suffix in (".mhtml", ".mht"):
+            doc = parse_mhtml(path)
+        else:
+            logger.error("Unsupported file format: %s", path.name)
+            return result
     except Exception as exc:
-        logger.error("parse_docx failed for %s: %s", path.name, exc)
+        logger.error("Parsing failed for %s: %s", path.name, exc)
         return result
 
     blocks = doc.blocks
     all_lines = doc.all_lines
 
     # --- Name ---
+    # For MHTML the mhtml_parser already put the name in blocks[0] (Heading 1).
+    # For docx/pdf we use the work.ua "Резюме від" heuristic.
     for block in blocks:
+        if block.style == "Heading 1":
+            first_line = block.text.splitlines()[0].strip()
+            if _looks_like_name(first_line):
+                result.name = first_line
+                break
         name = _extract_name_from_block(block.text)
         if name:
             result.name = name
@@ -373,9 +405,11 @@ def extract_resume(path: Path) -> ResumeData:
             break
 
     if not result.phone:
-        # Scan all lines for a phone-like pattern
+        # Scan all lines; strip parens/spaces before matching so formats like
+        # "+38 (098) 326-09-28" are found reliably.
         for line in all_lines:
-            if _PHONE_RAW.search(line.replace("\xa0", "")):
+            cleaned = re.sub(r"[\s\-\(\)]", "", line.replace("\xa0", ""))
+            if re.search(r"(?:\+?380|0)\d{9}", cleaned):
                 result.phone = _normalize_phone(line)
                 break
 
@@ -443,11 +477,16 @@ def extract_resume(path: Path) -> ResumeData:
                     break
 
     # --- Positions ---
-    try:
-        positions = _collect_positions(blocks)
-        result.positions = "; ".join(positions)
-    except Exception as exc:
-        logger.warning("Position extraction failed for %s: %s", path.name, exc)
+    # For MHTML the mhtml_parser stores the position as the second line of blocks[0].
+    mhtml_position = _read_mhtml_position(blocks)
+    if mhtml_position:
+        result.positions = mhtml_position
+    else:
+        try:
+            positions = _collect_positions(blocks)
+            result.positions = "; ".join(positions)
+        except Exception as exc:
+            logger.warning("Position extraction failed for %s: %s", path.name, exc)
 
     logger.info(
         "Extracted | file=%s name=%r phone=%r city=%r age=%r",
