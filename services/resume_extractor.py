@@ -166,6 +166,47 @@ def _looks_like_name(text: str) -> bool:
     return all(re.match(r"^[А-ЯЁЇІЄA-Z][а-яёїієa-z''\-A-Za-z]+$", w) for w in words)
 
 
+def _extract_pdf_position_after_name(name: str, all_lines: list[str]) -> str:
+    """
+    robota.ua PDF layout: the position title is always the line immediately
+    after the candidate's name.  Return that line if it passes sanity checks,
+    otherwise return an empty string.
+    """
+    if not name:
+        return ""
+    try:
+        idx = all_lines.index(name)
+    except ValueError:
+        return ""
+
+    if idx + 1 >= len(all_lines):
+        return ""
+
+    candidate = all_lines[idx + 1].strip()
+    if not candidate:
+        return ""
+
+    # Reject phone numbers
+    cleaned = re.sub(r"[\s\-\(\)]", "", candidate.replace("\xa0", ""))
+    if re.search(r"(?:\+?380|0)\d{9}", cleaned):
+        return ""
+    # Reject URLs / emails / viber links
+    if re.search(r"(?:https?://|viber://|t\.me/|www\.|@)", candidate, re.IGNORECASE):
+        return ""
+    # Reject salary lines
+    if re.search(r"\d.*грн|грн.*\d", candidate, re.IGNORECASE):
+        return ""
+    # Reject year/date-only lines
+    if re.match(r"^\d{1,2}\s+\w+\s+\d{4}", candidate):
+        return ""
+    # Reject obvious service headers
+    skip_prefixes = ("кандидат з", "резюме від", "сервіс", "http", "www")
+    if any(candidate.lower().startswith(p) for p in skip_prefixes):
+        return ""
+
+    return candidate
+
+
 def _collect_positions(blocks: list[TextBlock]) -> list[str]:
     """
     Collect ONLY the candidate's target / desired / current position.
@@ -345,6 +386,17 @@ def extract_resume(path: Path) -> ResumeData:
     mhtml_position = _read_mhtml_position(blocks)
     if mhtml_position:
         result.positions = mhtml_position
+    elif suffix == ".pdf" and result.name:
+        # robota.ua PDFs: position is always the line immediately after the name.
+        pdf_position = _extract_pdf_position_after_name(result.name, all_lines)
+        if pdf_position:
+            result.positions = pdf_position
+        else:
+            try:
+                positions = _collect_positions(blocks)
+                result.positions = "; ".join(positions)
+            except Exception as exc:
+                logger.warning("Position extraction failed for %s: %s", path.name, exc)
     else:
         try:
             positions = _collect_positions(blocks)
