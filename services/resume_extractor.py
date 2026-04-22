@@ -192,10 +192,20 @@ def _detect_source(path: Path) -> str:
 def _normalize_phone(raw: str) -> str:
     """Normalize any Ukrainian phone number to a plain digit string 380XXXXXXXXX."""
     cleaned = re.sub(r"[\s\-\(\)\+]", "", raw.replace("\xa0", ""))
-    m = re.search(r"(?:380|0)(\d{9})", cleaned)
+
+    # Try the international prefix first (380XXXXXXXXX).
+    # This must come before the leading-zero fallback so that a line like
+    # "13.03.2001380508527316" doesn't accidentally anchor on the "0" inside
+    # "2001" and return a wrong number.
+    m = re.search(r"380(\d{9})", cleaned)
     if m:
-        digits = m.group(1)  # 9 digits after country/leading 0
-        return f"380{digits}"
+        return f"380{m.group(1)}"
+
+    # Fallback: local format 0XXXXXXXXX — require a non-digit before the "0"
+    # to avoid matching a "0" that is part of a year (e.g. "2001").
+    m = re.search(r"(?<!\d)0(\d{9})(?!\d)", cleaned)
+    if m:
+        return f"380{m.group(1)}"
 
     # Return stripped original if we cannot normalize
     return raw.strip()
@@ -410,11 +420,13 @@ def extract_resume(path: Path) -> ResumeData:
             break
 
     if not result.phone:
-        # Scan all lines; strip parens/spaces before matching so formats like
-        # "+38 (098) 326-09-28" are found reliably.
+        # Scan all lines; strip formatting chars before matching.
+        # Use the same two-step priority as _normalize_phone: prefer "+?380"
+        # over a bare "0" so a date like "13.03.2001" on the same line as
+        # "+380XXXXXXXXX" doesn't trigger a false positive anchor.
         for line in all_lines:
             cleaned = re.sub(r"[\s\-\(\)]", "", line.replace("\xa0", ""))
-            if re.search(r"(?:\+?380|0)\d{9}", cleaned):
+            if re.search(r"\+?380\d{9}", cleaned) or re.search(r"(?<!\d)0\d{9}(?!\d)", cleaned):
                 result.phone = _normalize_phone(line)
                 break
 
