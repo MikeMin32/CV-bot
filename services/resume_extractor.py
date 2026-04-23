@@ -850,6 +850,8 @@ def _extract_name_from_block(text: str) -> str:
 _NAME_WORD_MIXED = re.compile(r"^[А-ЯЁЇІЄA-Z][а-яёїієa-z''\-A-Za-z]+$")
 # ALL-CAPS variant used by some Canva / custom PDF templates (e.g. "ВІКТОРІЯ").
 _NAME_WORD_UPPER = re.compile(r"^[А-ЯЁЇІЄA-Z]{2,}(?:['ʼ\-][А-ЯЁЇІЄA-Z]+)*$")
+# Single uppercase letter — robota.ua privacy-shortened surname (e.g. "Дарія Ч").
+_NAME_WORD_INITIAL = re.compile(r"^[А-ЯЁЇІЄA-Z]$")
 
 
 def _looks_like_name(text: str) -> bool:
@@ -863,7 +865,7 @@ def _looks_like_name(text: str) -> bool:
     if not (2 <= len(words) <= 4):
         return False
     for w in words:
-        if not (_NAME_WORD_MIXED.match(w) or _NAME_WORD_UPPER.match(w)):
+        if not (_NAME_WORD_MIXED.match(w) or _NAME_WORD_UPPER.match(w) or _NAME_WORD_INITIAL.match(w)):
             return False
     return True
 
@@ -1001,7 +1003,7 @@ def _extract_pdf_position_after_name(name: str, all_lines: list[str]) -> str:
 # ---------------------------------------------------------------------------
 
 _ROBOTA_FILENAME_RE = re.compile(
-    r"^(?P<body>.+?)_id_\d+_robota(?:_ua)?$",
+    r"^(?P<body>.+?)[\s_]id[\s_]\d+[\s_]robota(?:[.\s_]ua)?$",
     re.IGNORECASE,
 )
 
@@ -1029,10 +1031,13 @@ def _position_from_filename(filename: str, name: str) -> str:
         body = m.group("body")
         if name:
             # Strip the name words from the tail, one by one (order-insensitive).
+            # Support both space-separated and underscore-separated filenames.
             for word in reversed(name.split()):
-                suffix = "_" + word
-                if body.lower().endswith(suffix.lower()):
-                    body = body[: -len(suffix)]
+                for sep in (" ", "_"):
+                    suffix = sep + word
+                    if body.lower().endswith(suffix.lower()):
+                        body = body[: -len(suffix)]
+                        break
         return body.replace("_", " ").strip()
 
     # work.ua-style: anything after "Резюме — "
