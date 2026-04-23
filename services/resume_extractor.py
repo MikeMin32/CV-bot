@@ -93,6 +93,75 @@ _EXPERIENCE_SECTION_HEADERS: frozenset[str] = frozenset({
     "employment history",
     "work history",
     "career history",
+    "досвід",
+    "зайнятість",
+})
+
+# Common section / sidebar headers that can appear alone on a line and
+# must not be confused with job titles, company names, or candidate names.
+# All entries are stored in lowercase for case-insensitive comparison.
+_SIDE_HEADERS: frozenset[str] = frozenset({
+    "особисті дані",
+    "особиста інформація",
+    "контакти",
+    "контактна інформація",
+    "контактні дані",
+    "зайнятість",
+    "освіта",
+    "додаткова освіта",
+    "додаткова освіта та сертифікати",
+    "навички",
+    "ключові навички",
+    "професійні навички",
+    "hard skills",
+    "soft skills",
+    "мови",
+    "мова",
+    "знання мов",
+    "хобі",
+    "інтереси",
+    "професійні якості",
+    "особисті якості",
+    "сертифікати",
+    "рекомендації",
+    "додаткова інформація",
+    "додаткова діяльність",
+    "про себе",
+    "про мене",
+    "коротко про мене",
+    "короткий зміст",
+    "курси",
+    "що я вмію",
+    "резюме",
+    "контакти:",
+})
+
+# All-caps section headers that should never be treated as candidate names.
+_NOT_NAME_HEADERS: frozenset[str] = frozenset({
+    "резюме",
+    "досвід роботи",
+    "досвід",
+    "освіта",
+    "навички",
+    "про себе",
+    "про мене",
+    "контакти",
+    "контактна інформація",
+    "короткий зміст",
+    "мова",
+    "мови",
+    "курси",
+    "сертифікати",
+    "хобі",
+    "інтереси",
+    "професійні якості",
+    "особисті якості",
+    "додаткова інформація",
+    "додаткова діяльність",
+    "додаткова освіта",
+    "що я вмію",
+    "ключова інформація",
+    "ключові навички",
 })
 
 # ---------------------------------------------------------------------------
@@ -111,9 +180,36 @@ _DATE_RANGE_WORKUA_LINE = re.compile(
     re.IGNORECASE,
 )
 
-# Custom resume date ranges: "DD.MM.YYYY – DD.MM.YYYY" or "YYYY – YYYY"
+# Abbreviated Ukrainian month names used by many custom resume builders.
+_UA_SHORT_MONTH = r"(?:січ|лют|бер|квіт|трав|черв|лип|серп|вер|жовт|лист|груд)"
+
+# A single date endpoint: DD.MM.YYYY, MM.YYYY, YYYY, or "мес YYYY".
+_DATE_POINT = (
+    rf"(?:\d{{2}}\.\d{{2}}\.\d{{4}}"
+    rf"|\d{{2}}\.\d{{4}}"
+    rf"|\d{{4}}"
+    rf"|{_UA_SHORT_MONTH}\s+\d{{4}})"
+)
+
+# Open-ended / ongoing markers that can appear on the right side of a range.
+_DATE_POINT_OPEN = (
+    rf"(?:{_DATE_POINT}"
+    r"|Нинішній"
+    r"|нині"
+    r"|теперішній\s+час"
+    r"|до\s+теперішнього\s+часу"
+    r"|наш\s+час"
+    r"|present"
+    r"|now)"
+)
+
+# Custom resume date ranges used in many non-platform CVs.  Handles:
+#   "DD.MM.YYYY – DD.MM.YYYY", "YYYY – YYYY",
+#   "лют 2021 - серп 2024", "вер 2020 - лип 2024",
+#   "квіт 2024 - Нинішній", "2021 - present".
 _DATE_RANGE_CUSTOM = re.compile(
-    r"(?:\d{2}\.\d{2}\.\d{4}|\d{4})\s*[-–]\s*(?:\d{2}\.\d{2}\.\d{4}|\d{4})",
+    rf"{_DATE_POINT}\s*[-–—]\s*{_DATE_POINT_OPEN}",
+    re.IGNORECASE,
 )
 
 # Duration-only lines, e.g. "2 роки 3 місяці", "8 місяців"
@@ -144,17 +240,37 @@ _ROBOTA_EXP_STOP: frozenset[str] = frozenset({
     "володіє мовами",
 })
 
-# Lines that mark the end of the experience section in custom PDFs
+# Lines that mark the end of the experience section in custom PDFs.
+# We stop scanning once we encounter one of these headers after the trigger.
 _CUSTOM_EXP_STOP: frozenset[str] = frozenset({
     "освіта",
     "навички",
+    "ключові навички",
+    "професійні навички",
     "контактна інформація",
+    "контакти",
     "мови",
+    "мова",
+    "знання мов",
     "про себе",
     "про мене",
     "summary",
     "education",
     "skills",
+    "hard skills",
+    "soft skills",
+    "сертифікати",
+    "рекомендації",
+    "додаткова діяльність",
+    "додаткова освіта",
+    "курси",
+    "хобі",
+    "інтереси",
+    "особисті якості",
+    "професійні якості",
+    "languages",
+    "certificates",
+    "additional information",
 })
 
 
@@ -171,6 +287,28 @@ def _is_exp_noise(line: str) -> bool:
         return True
     if re.match(r"^\d+$", line):      # bare numeric IDs
         return True
+    if cl in _SIDE_HEADERS:
+        return True
+    return False
+
+
+# Punctuation that typically ends a bullet/description line.
+_DESC_ENDS = (".", "!", "?", ":", ";")
+_DESC_STARTS = ("•", "●", "▪", "–", "—", "-", "·")
+
+
+def _is_description_line(line: str) -> bool:
+    """
+    Heuristic for description / responsibility lines that should be ignored
+    when collecting job-identifier candidates (title / company).
+    """
+    if not line:
+        return True
+    s = line.strip()
+    if s.startswith(_DESC_STARTS):
+        return True
+    if s.endswith(_DESC_ENDS):
+        return True
     return False
 
 
@@ -182,65 +320,170 @@ def _format_job_entry(title: str, company: str, dates: str) -> str:
     return text
 
 
+def _collect_above(
+    exp_lines: list[str],
+    di: int,
+    prev_di: int,
+) -> list[str]:
+    """
+    Walk backwards from di-1 down to prev_di+1, collecting identifier
+    candidates (non-noise, non-description lines).  Stops at the first
+    description or bullet line so that descriptions from the *previous* job
+    do not leak into this job's candidates.
+
+    Returns the candidates in their original document order.
+    """
+    items: list[str] = []
+    for j in range(di - 1, prev_di, -1):
+        line = exp_lines[j].strip()
+        if not line or _is_exp_noise(line):
+            continue
+        if _is_description_line(line):
+            break
+        items.append(line)
+    items.reverse()
+    return items
+
+
+def _collect_below(
+    exp_lines: list[str],
+    di: int,
+    next_di: int,
+    limit: int = 2,
+) -> list[str]:
+    """
+    Walk forward from di+1, collecting up to ``limit`` identifier candidates.
+    Stops at the first description/bullet line so that descriptions of the
+    *current* job do not leak into its identifier set.
+    """
+    items: list[str] = []
+    for j in range(di + 1, next_di):
+        line = exp_lines[j].strip()
+        if not line or _is_exp_noise(line):
+            continue
+        if _is_description_line(line):
+            break
+        items.append(line)
+        if len(items) >= limit:
+            break
+    return items
+
+
+def _dedupe(items: list[str]) -> list[str]:
+    seen: set[str] = set()
+    out: list[str] = []
+    for it in items:
+        if it and it not in seen:
+            seen.add(it)
+            out.append(it)
+    return out
+
+
+def _detect_job_format(
+    exp_lines: list[str],
+    date_indices: list[int],
+) -> str:
+    """
+    Detect the structural ordering used by the document, based on the first
+    date range encountered:
+
+      • "before_complete" — identifiers appear BEFORE the date line
+        (e.g. work.ua / robota.ua / Альбіна-style: title+company then date).
+      • "company_after"   — only the title appears before the date;
+        the company appears on the line directly after
+        (e.g. some Canva CV templates: Title / Date / Company / description).
+      • "date_first"      — date appears FIRST, then title, then company
+        (e.g. Васенко-style templates).
+    """
+    if not date_indices:
+        return "before_complete"
+
+    first_di = date_indices[0]
+    next_di = date_indices[1] if len(date_indices) > 1 else len(exp_lines)
+    above = _collect_above(exp_lines, first_di, -1)
+    below = _collect_below(exp_lines, first_di, next_di, limit=2)
+
+    if len(above) >= 2:
+        return "before_complete"
+    if len(above) == 1 and below:
+        return "company_after"
+    if not above and len(below) >= 2:
+        return "date_first"
+    # Fallback: assume the classic "identifiers before date" layout.
+    return "before_complete"
+
+
+def _split_title_company_pipe(text: str) -> tuple[str, str]:
+    """Split a 'Title|Company' combined line (some custom templates)."""
+    parts = text.split("|", 1)
+    return parts[0].strip(), parts[1].strip()
+
+
 def _parse_jobs_from_exp_lines(
     exp_lines: list[str],
     date_re: re.Pattern,
 ) -> str:
     """
-    Shared engine: given cleaned experience lines and a date-range regex,
-    extract (title, company, dates) for every job using a window + dedup
-    approach.
-
-    For each date-range line, the window [prev_date+1 … di-1] is filtered for
-    noise, then deduplicated (first occurrence kept).  After dedup the last two
-    items are title and company.  If the last item contains '|' it is treated as
-    a combined "title|company" entry.  If there are ≥ 3 items the first one is
-    treated as the industry label and, when the company ends with it, the label
-    is stripped from the company string.
+    Extract (title, company, dates) tuples for every job.  Supports three
+    structural orderings — ``before_complete`` (title/company before date,
+    as used by work.ua / robota.ua), ``company_after`` (title before date,
+    company directly after), and ``date_first`` (date precedes title/company).
+    The format is auto-detected from the first date range and then reused
+    for the whole document.
     """
     date_indices = [i for i, l in enumerate(exp_lines) if date_re.search(l)]
     if not date_indices:
         return ""
 
+    fmt = _detect_job_format(exp_lines, date_indices)
     jobs: list[str] = []
+
     for idx, di in enumerate(date_indices):
         date_str = exp_lines[di].strip()
-        prev_date = date_indices[idx - 1] if idx > 0 else -1
+        prev_di = date_indices[idx - 1] if idx > 0 else -1
+        next_di = date_indices[idx + 1] if idx + 1 < len(date_indices) else len(exp_lines)
 
-        # Collect non-noise lines in the window, preserving forward order
-        raw: list[str] = []
-        for j in range(prev_date + 1, di):
-            l = exp_lines[j].strip()
-            if not _is_exp_noise(l):
-                raw.append(l)
+        above = _dedupe(_collect_above(exp_lines, di, prev_di))
+        below = _collect_below(exp_lines, di, next_di, limit=2)
 
-        # Deduplicate keeping first occurrence (this removes MHTML industry repeats)
-        seen: set[str] = set()
-        deduped: list[str] = []
-        for l in raw:
-            if l not in seen:
-                seen.add(l)
-                deduped.append(l)
+        title = ""
+        company = ""
 
-        if not deduped:
-            continue
+        if fmt == "company_after":
+            # Title sits directly above the date; company sits directly below.
+            if above:
+                title = above[-1]
+            if below:
+                company = below[0]
+            # Rare fallback for the first job in templates where the very
+            # first title also precedes only one line: use "|" split if present.
+            if title and "|" in title and not company:
+                title, company = _split_title_company_pipe(title)
 
-        last = deduped[-1]
+        elif fmt == "date_first":
+            if below:
+                title = below[0]
+            if len(below) >= 2:
+                company = below[1]
+            if title and "|" in title and not company:
+                title, company = _split_title_company_pipe(title)
 
-        # "Title|Company" combined line (e.g. some custom resumes)
-        if "|" in last:
-            parts = last.split("|", 1)
-            title, company = parts[0].strip(), parts[1].strip()
-        elif len(deduped) == 1:
-            title, company = last, ""
-        else:
-            title = deduped[-2]
-            company = last
-            # Strip trailing industry label from company (robota.ua PDF format)
-            if len(deduped) >= 3:
-                industry = deduped[-3]
-                if company.endswith(industry):
-                    company = company[: -len(industry)].strip()
+        else:  # before_complete
+            if above:
+                last = above[-1]
+                if "|" in last:
+                    title, company = _split_title_company_pipe(last)
+                elif len(above) == 1:
+                    title = last
+                else:
+                    title = above[-2]
+                    company = last
+                    # Strip the industry suffix repeated on the company line
+                    # (robota.ua PDF quirk, e.g. "ТОВ «…» Роздрібна торгівля").
+                    if len(above) >= 3:
+                        industry = above[-3]
+                        if company.endswith(industry):
+                            company = company[: -len(industry)].strip()
 
         if title:
             jobs.append(_format_job_entry(title, company, date_str))
@@ -316,14 +559,31 @@ def _extract_work_experience_robota(all_lines: list[str]) -> str:
     return _parse_jobs_from_exp_lines(exp_lines, _DATE_RANGE_ROBOTA)
 
 
+_CUSTOM_EXP_TRIGGERS: frozenset[str] = frozenset({
+    "досвід роботи",
+    "досвід",
+    "опыт работы",
+    "опыт",
+    "experience",
+    "work experience",
+    "employment history",
+    "work history",
+    "career history",
+    "зайнятість",
+    "робочий досвід",
+    "професійний досвід",
+})
+
+
 def _extract_work_experience_custom(all_lines: list[str]) -> str:
     """
-    Extract work experience from non-platform PDFs that use a plain
-    'ДОСВІД РОБОТИ' section header.
+    Extract work experience from non-platform PDFs that use a plain section
+    header such as ``ДОСВІД РОБОТИ``, ``Досвід``, ``Зайнятість``, ``Experience``.
     """
     trigger_idx = None
     for i, line in enumerate(all_lines):
-        if line.strip().lower() in ("досвід роботи", "experience", "work experience"):
+        cl = line.strip().lower().rstrip(":")
+        if cl in _CUSTOM_EXP_TRIGGERS:
             trigger_idx = i + 1
             break
     if trigger_idx is None:
@@ -342,6 +602,25 @@ def _extract_work_experience_custom(all_lines: list[str]) -> str:
 # Age value patterns
 _AGE_VALUE = re.compile(r"(\d{1,3})\s*(?:\xa0|\s)*(?:рік|роки|років|years?|год)", re.IGNORECASE)
 _AGE_BARE = re.compile(r"^(\d{1,3})$")
+
+# Labels that precede a birth-date value (inline or on the next line).
+_BIRTH_LABELS: tuple[str, ...] = (
+    "дата народження",
+    "день народження",
+    "народився",
+    "народжений",
+    "народжена",
+    "дата рождения",
+    "date of birth",
+    "birthdate",
+    "d.o.b.",
+    "dob",
+)
+
+# Matches DD.MM.YYYY / DD/MM/YYYY / DD-MM-YYYY (with strict 4-digit year).
+_DOTTED_DATE_RE = re.compile(
+    r"(?<!\d)(\d{1,2})[./\-](\d{1,2})[./\-](\d{4})(?!\d)"
+)
 
 # Ukrainian phone normalization
 _PHONE_RAW = re.compile(
@@ -392,6 +671,81 @@ def _parse_ua_date(text: str) -> datetime | None:
         return datetime(year, month, day)
     except ValueError:
         return None
+
+
+def _parse_dotted_date(text: str) -> datetime | None:
+    """Parse 'DD.MM.YYYY' (or '/'/'-' separators) from any text string."""
+    m = _DOTTED_DATE_RE.search(text)
+    if not m:
+        return None
+    try:
+        day, month, year = int(m.group(1)), int(m.group(2)), int(m.group(3))
+        if not (1 <= month <= 12 and 1 <= day <= 31):
+            return None
+        return datetime(year, month, day)
+    except ValueError:
+        return None
+
+
+def _parse_any_date(text: str) -> datetime | None:
+    """Parse either a Ukrainian-word date or a DD.MM.YYYY dotted date."""
+    return _parse_ua_date(text) or _parse_dotted_date(text)
+
+
+def _age_from_birth(birth: datetime, ref: datetime | None = None) -> int:
+    """Compute the age in whole years from a birth date."""
+    today = (ref or datetime.now()).date()
+    b = birth.date()
+    age = today.year - b.year
+    if (today.month, today.day) < (b.month, b.day):
+        age -= 1
+    return age
+
+
+def _extract_birth_date(all_lines: list[str]) -> datetime | None:
+    """
+    Return the candidate's birth date, if it can be located.
+
+    Strategy:
+      1. Explicit label ("Дата народження", "Date of birth", …) followed by
+         a date — either inline on the same line or on the next non-empty line.
+      2. Fallback: scan every line for a date whose year is at most
+         ``current_year - 15`` (heuristic: working-age candidates are born
+         before that cut-off, so any such date is almost certainly a DOB
+         rather than a publication / education / work-experience date).
+
+    Both Ukrainian-word dates ("17 жовтня 2005") and dotted dates
+    ("13.03.2001" / "02/04/2003") are supported.
+    """
+    now_year = datetime.now().year
+    max_birth_year = now_year - 15  # candidate must be ≥ 15 years old
+    min_birth_year = now_year - 90  # sanity upper bound
+
+    def _accept(d: datetime | None) -> datetime | None:
+        if d and min_birth_year <= d.year <= max_birth_year:
+            return d
+        return None
+
+    # 1. Label-based lookup (inline value first, then the following line).
+    for i, line in enumerate(all_lines):
+        low = line.strip().lower()
+        if not any(low.startswith(lbl) for lbl in _BIRTH_LABELS):
+            continue
+        d = _accept(_parse_any_date(line))
+        if d:
+            return d
+        # Look ahead a couple of lines for the date value.
+        for j in range(i + 1, min(i + 3, len(all_lines))):
+            d = _accept(_parse_any_date(all_lines[j]))
+            if d:
+                return d
+
+    # 2. Fallback: first plausible birth-year date anywhere in the document.
+    for line in all_lines:
+        d = _accept(_parse_any_date(line))
+        if d:
+            return d
+    return None
 
 
 def _resolve_relative_date(raw: str, reference: datetime) -> datetime | None:
@@ -474,19 +828,132 @@ def _extract_name_from_block(text: str) -> str:
     return ""
 
 
+_NAME_WORD_MIXED = re.compile(r"^[А-ЯЁЇІЄA-Z][а-яёїієa-z''\-A-Za-z]+$")
+# ALL-CAPS variant used by some Canva / custom PDF templates (e.g. "ВІКТОРІЯ").
+_NAME_WORD_UPPER = re.compile(r"^[А-ЯЁЇІЄA-Z]{2,}(?:['ʼ\-][А-ЯЁЇІЄA-Z]+)*$")
+
+
 def _looks_like_name(text: str) -> bool:
-    """Heuristic: 2–4 words, each starting with uppercase, mostly letters."""
-    words = text.strip().split()
+    """Heuristic: 2–4 words that look like Cyrillic/Latin name parts."""
+    s = text.strip()
+    if not s:
+        return False
+    if s.lower() in _NOT_NAME_HEADERS:
+        return False
+    words = s.split()
     if not (2 <= len(words) <= 4):
         return False
-    return all(re.match(r"^[А-ЯЁЇІЄA-Z][а-яёїієa-z''\-A-Za-z]+$", w) for w in words)
+    for w in words:
+        if not (_NAME_WORD_MIXED.match(w) or _NAME_WORD_UPPER.match(w)):
+            return False
+    return True
+
+
+def _normalize_name(name: str) -> str:
+    """Convert ALL-CAPS names to Title Case; leave mixed-case names untouched."""
+    s = name.strip()
+    if not s:
+        return s
+    words = s.split()
+    if all(w.isupper() for w in words if any(c.isalpha() for c in w)):
+        return " ".join(w.capitalize() for w in words)
+    return s
+
+
+_POSITION_SKIP_PREFIXES: tuple[str, ...] = (
+    "кандидат з", "резюме від", "сервіс", "http", "www",
+    "телефон", "email", "e-mail", "телеграм", "telegram", "контакт",
+)
+
+
+def _is_contact_or_service_line(line: str) -> bool:
+    """True if the line is clearly contact info or a known service header."""
+    s = line.strip()
+    if not s:
+        return True
+    cl = s.lower()
+    if cl in _SIDE_HEADERS or cl in _NOT_NAME_HEADERS:
+        return True
+    cleaned = re.sub(r"[\s\-\(\)]", "", s.replace("\xa0", ""))
+    if re.search(r"(?:\+?380|0)\d{9}", cleaned):
+        return True
+    if re.search(r"(?:https?://|viber://|t\.me/|www\.|@)", s, re.IGNORECASE):
+        return True
+    if re.search(r"\d.*грн|грн.*\d", s, re.IGNORECASE):
+        return True
+    if _UA_DATE_RE.search(s):
+        return True
+    if re.match(r"^\d{1,2}\s+\w+\s+\d{4}", s):
+        return True
+    if re.search(r"\d{4}\s*р\.", s):
+        return True
+    if any(cl.startswith(p) for p in _POSITION_SKIP_PREFIXES):
+        return True
+    # Bare city markers like "м. Вінниця" / "м.Київ"
+    if re.match(r"^м\.\s*[А-ЯЁЇІЄA-Z]", s):
+        return True
+    # Gender / marital status single-word lines
+    if cl in ("жіночий", "чоловічий", "жіноча", "чоловіча",
+             "неодружений", "неодружена", "одружений", "одружена",
+             "неодружений/неодружена"):
+        return True
+    return False
+
+
+def _join_position_lines(lines: list[str]) -> str:
+    """Join wrapped position lines, collapsing whitespace and trailing punctuation."""
+    text = " ".join(lines)
+    text = re.sub(r"\s*,\s*", ", ", text)
+    text = re.sub(r"\s+", " ", text).strip()
+    return text.rstrip(",; ")
+
+
+def _extract_pdf_position_from_blocks(name: str, blocks: list[TextBlock]) -> str:
+    """
+    Look up the candidate's name inside each text block and return the
+    professional headline that follows it *within the same block*.
+
+    Many modern CV templates put the name and the (possibly multi-line)
+    position in the same paragraph.  We keep collecting lines as long as the
+    next one starts with a lowercase letter — a reliable signal for a wrapped
+    continuation of the same headline — or until we hit a contact/service
+    line or another section header.
+    """
+    if not name:
+        return ""
+    for block in blocks:
+        lines = [l.strip() for l in block.text.splitlines() if l.strip()]
+        if name not in lines:
+            continue
+        idx = lines.index(name)
+        after = lines[idx + 1:]
+        # We only trust the FIRST block that contains the candidate's name —
+        # later occurrences are usually repeats inside sidebar contact blocks
+        # (e.g. under "ПІБ" / "Адреса" labels) and produce false positives.
+        if not after:
+            return ""
+        first = after[0]
+        if _is_contact_or_service_line(first):
+            return ""
+        collected = [first]
+        for nxt in after[1:]:
+            if not nxt or _is_contact_or_service_line(nxt):
+                break
+            # Wrapped continuation: starts with a lowercase Cyrillic/Latin letter.
+            if nxt[:1].isalpha() and nxt[:1].islower():
+                collected.append(nxt)
+                if len(collected) >= 5:
+                    break
+                continue
+            break
+        return _join_position_lines(collected)
+    return ""
 
 
 def _extract_pdf_position_after_name(name: str, all_lines: list[str]) -> str:
     """
-    robota.ua PDF layout: the position title is always the line immediately
-    after the candidate's name.  Return that line if it passes sanity checks,
-    otherwise return an empty string.
+    Fallback for the flat-text case: return the line immediately after the
+    candidate's name when it passes basic sanity checks.
     """
     if not name:
         return ""
@@ -499,28 +966,61 @@ def _extract_pdf_position_after_name(name: str, all_lines: list[str]) -> str:
         return ""
 
     candidate = all_lines[idx + 1].strip()
-    if not candidate:
+    if not candidate or _is_contact_or_service_line(candidate):
         return ""
-
-    # Reject phone numbers
-    cleaned = re.sub(r"[\s\-\(\)]", "", candidate.replace("\xa0", ""))
-    if re.search(r"(?:\+?380|0)\d{9}", cleaned):
-        return ""
-    # Reject URLs / emails / viber links
-    if re.search(r"(?:https?://|viber://|t\.me/|www\.|@)", candidate, re.IGNORECASE):
-        return ""
-    # Reject salary lines
-    if re.search(r"\d.*грн|грн.*\d", candidate, re.IGNORECASE):
-        return ""
-    # Reject year/date-only lines
-    if re.match(r"^\d{1,2}\s+\w+\s+\d{4}", candidate):
-        return ""
-    # Reject obvious service headers
-    skip_prefixes = ("кандидат з", "резюме від", "сервіс", "http", "www")
-    if any(candidate.lower().startswith(p) for p in skip_prefixes):
-        return ""
-
     return candidate
+
+
+# ---------------------------------------------------------------------------
+# Filename-based position fallback
+# ---------------------------------------------------------------------------
+
+_ROBOTA_FILENAME_RE = re.compile(
+    r"^(?P<body>.+?)_id_\d+_robota(?:_ua)?$",
+    re.IGNORECASE,
+)
+
+
+def _position_from_filename(filename: str, name: str) -> str:
+    """
+    Best-effort extraction of the resume headline from common filename
+    conventions used by Ukrainian job boards and users exporting from them:
+
+    • robota.ua:  ``<Position>_<Name>_id_<digits>_robota[_ua].pdf``
+    • work.ua:    ``Резюме_—_<Position>,_<Name>.pdf``
+      (position may contain commas — we treat the *last* comma-separated
+       piece that looks like a person name as the candidate's name.)
+    """
+    if not filename:
+        return ""
+    stem = filename
+    for ext in (".pdf", ".PDF", ".docx", ".DOCX", ".mhtml", ".mht"):
+        if stem.endswith(ext):
+            stem = stem[: -len(ext)]
+            break
+
+    m = _ROBOTA_FILENAME_RE.match(stem)
+    if m:
+        body = m.group("body")
+        if name:
+            # Strip the name words from the tail, one by one (order-insensitive).
+            for word in reversed(name.split()):
+                suffix = "_" + word
+                if body.lower().endswith(suffix.lower()):
+                    body = body[: -len(suffix)]
+        return body.replace("_", " ").strip()
+
+    # work.ua-style: anything after "Резюме — "
+    if stem.lower().startswith("резюме"):
+        body = re.sub(r"^резюме\s*[_\s]*[—–\-]\s*[_\s]*", "",
+                      stem, count=1, flags=re.IGNORECASE)
+        body = body.replace("_", " ").strip()
+        parts = [p.strip() for p in body.split(",") if p.strip()]
+        if len(parts) >= 2 and _looks_like_name(parts[-1]):
+            return ", ".join(parts[:-1])
+        return body
+
+    return ""
 
 
 def _collect_positions(blocks: list[TextBlock]) -> list[str]:
@@ -635,26 +1135,31 @@ def extract_resume(path: Path) -> ResumeData:
     # --- Name ---
     # For MHTML the mhtml_parser already put the name in blocks[0] (Heading 1).
     # For docx/pdf we use the work.ua "Резюме від" heuristic.
+    raw_name = ""
     for block in blocks:
         if block.style == "Heading 1":
             first_line = block.text.splitlines()[0].strip()
             if _looks_like_name(first_line):
-                result.name = first_line
+                raw_name = first_line
                 break
         name = _extract_name_from_block(block.text)
         if name:
-            result.name = name
+            raw_name = name
             break
 
     # Fallback: first line that looks like a name (skip service lines)
-    if not result.name:
-        skip_prefixes = ("сервіс", "резюме", "http", "www")
+    if not raw_name:
+        skip_prefixes = ("сервіс", "резюме", "http", "www", "кандидат")
         for line in all_lines:
             if any(line.lower().startswith(p) for p in skip_prefixes):
                 continue
             if _looks_like_name(line):
-                result.name = line
+                raw_name = line
                 break
+
+    # Store the canonical (Title Case) form, but keep ``raw_name`` for lookups
+    # so that ALL-CAPS resumes still match the exact line in the document.
+    result.name = _normalize_name(raw_name)
 
     # --- Phone ---
     for line in all_lines:
@@ -699,22 +1204,41 @@ def extract_resume(path: Path) -> ResumeData:
                     result.age = str(candidate)
                     break
 
+    if not result.age:
+        # Last-chance: derive age from a birth date in the document.
+        # Example sources: "Дата народження\n2 квітня 2003 р." (Canva/work.ua
+        # templates) or an inline DOB right after the name (robota.ua PDFs).
+        birth = _extract_birth_date(all_lines)
+        if birth is not None:
+            age_years = _age_from_birth(birth)
+            if 15 <= age_years <= 90:
+                result.age = str(age_years)
+
     # --- Positions ---
     # For MHTML the mhtml_parser stores the position as the second line of blocks[0].
     mhtml_position = _read_mhtml_position(blocks)
     if mhtml_position:
         result.positions = mhtml_position
-    elif suffix == ".pdf" and result.name:
-        # robota.ua PDFs: position is always the line immediately after the name.
-        pdf_position = _extract_pdf_position_after_name(result.name, all_lines)
-        if pdf_position:
-            result.positions = pdf_position
-        else:
+    elif suffix == ".pdf":
+        pdf_position = ""
+        # 1. Preferred: multi-line headline that sits in the same paragraph
+        #    as the candidate's name (works for most modern CV templates).
+        if raw_name:
+            pdf_position = _extract_pdf_position_from_blocks(raw_name, blocks)
+        # 2. Fallback: classic robota.ua layout — line directly after the name.
+        if not pdf_position and raw_name:
+            pdf_position = _extract_pdf_position_after_name(raw_name, all_lines)
+        # 3. Last resort: recognisable filename patterns (robota.ua / work.ua).
+        if not pdf_position:
+            pdf_position = _position_from_filename(path.name, result.name)
+        # 4. Heading-based fallback (kept for any PDFs that expose heading styles).
+        if not pdf_position:
             try:
                 positions = _collect_positions(blocks)
-                result.positions = "; ".join(positions)
+                pdf_position = "; ".join(positions)
             except Exception as exc:
                 logger.warning("Position extraction failed for %s: %s", path.name, exc)
+        result.positions = pdf_position
     else:
         try:
             positions = _collect_positions(blocks)
@@ -727,7 +1251,14 @@ def extract_resume(path: Path) -> ResumeData:
         if suffix == ".docx":
             result.work_experience = _extract_work_experience_from_blocks(blocks)
         elif result.source == "robota.ua":
-            result.work_experience = _extract_work_experience_robota(all_lines)
+            # Classic robota.ua export (MHTML / legacy PDF) uses the
+            # "Працював(а) в N компанії…" trigger.  Newer robota.ua PDF
+            # variants don't — fall back to the generic custom parser so
+            # the candidate still gets work-experience data.
+            exp = _extract_work_experience_robota(all_lines)
+            if not exp:
+                exp = _extract_work_experience_custom(all_lines)
+            result.work_experience = exp
         else:
             result.work_experience = _extract_work_experience_custom(all_lines)
     except Exception as exc:
@@ -744,9 +1275,14 @@ def extract_resume(path: Path) -> ResumeData:
         # For DOCX and PDF: scan the first 15 lines for a Ukrainian date.
         # DOCX work.ua: "Резюме від 24 грудня 2025"
         # PDF robota.ua: "16 квітня 2026 року" (appears near the top)
+        #
+        # Guard: many CV templates also show the candidate's birth date near
+        # the top (e.g. "17 жовтня 2005 р.").  We therefore reject any date
+        # that is clearly too old to be a publication date.
+        now_year = datetime.now().year
         for line in all_lines[:15]:
             d = _parse_ua_date(line)
-            if d:
+            if d and (now_year - 3) <= d.year <= (now_year + 1):
                 result.publication_date = d
                 break
 
