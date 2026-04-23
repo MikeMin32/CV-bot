@@ -850,14 +850,20 @@ def _looks_like_name(text: str) -> bool:
 
 
 def _normalize_name(name: str) -> str:
-    """Convert ALL-CAPS names to Title Case; leave mixed-case names untouched."""
-    s = name.strip()
+    """Convert ALL-CAPS names to Title Case and collapse internal whitespace.
+
+    Some DOCX templates leave double (or non-breaking) spaces between the
+    surname and given name inside merged table cells.  Callers compare the
+    stored name against raw document lines, so we always return a
+    single-space-joined form.
+    """
+    s = name.replace("\xa0", " ").strip()
     if not s:
         return s
     words = s.split()
     if all(w.isupper() for w in words if any(c.isalpha() for c in w)):
         return " ".join(w.capitalize() for w in words)
-    return s
+    return " ".join(words)
 
 
 _POSITION_SKIP_PREFIXES: tuple[str, ...] = (
@@ -1240,11 +1246,19 @@ def extract_resume(path: Path) -> ResumeData:
                 logger.warning("Position extraction failed for %s: %s", path.name, exc)
         result.positions = pdf_position
     else:
+        docx_position = ""
         try:
             positions = _collect_positions(blocks)
-            result.positions = "; ".join(positions)
+            docx_position = "; ".join(positions)
         except Exception as exc:
             logger.warning("Position extraction failed for %s: %s", path.name, exc)
+        # Free-form DOCX templates often lack heading styles and explicit
+        # "Посада" labels — fall back to the filename convention used by
+        # work.ua exports ("Резюме — <Position>, <Name>.docx") and by many
+        # users who manually save their resume with the same pattern.
+        if not docx_position:
+            docx_position = _position_from_filename(path.name, result.name)
+        result.positions = docx_position
 
     # --- Work experience ---
     try:
