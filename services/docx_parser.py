@@ -27,14 +27,25 @@ class ParsedDocument:
 
     @property
     def all_lines(self) -> list[str]:
-        """All non-empty text lines from paragraphs + tables."""
+        """All non-empty text lines from paragraphs + tables.
+
+        Table lines are further split on newlines so that values packed into a
+        single merged cell (e.g. name / DOB / phone / email all in one cell of
+        a free-form DOCX template) become independently matchable lines.  The
+        original joined form is preserved in ``table_lines`` so label-based
+        regexes with embedded tabs still work.
+        """
         lines: list[str] = []
         for block in self.blocks:
             for line in block.text.splitlines():
                 stripped = line.strip()
                 if stripped:
                     lines.append(stripped)
-        lines.extend(self.table_lines)
+        for tline in self.table_lines:
+            for line in tline.splitlines():
+                stripped = line.strip()
+                if stripped:
+                    lines.append(stripped)
         return lines
 
 
