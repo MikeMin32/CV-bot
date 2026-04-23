@@ -206,9 +206,11 @@ _DATE_POINT_OPEN = (
 # Custom resume date ranges used in many non-platform CVs.  Handles:
 #   "DD.MM.YYYY – DD.MM.YYYY", "YYYY – YYYY",
 #   "лют 2021 - серп 2024", "вер 2020 - лип 2024",
-#   "квіт 2024 - Нинішній", "2021 - present".
+#   "квіт 2024 - Нинішній", "2021 - present",
+#   "з 12.2024 по 04.2026" / "з 11.2022 по нині"
+#   (used by newer robota.ua PDF exports and by work.ua style CVs).
 _DATE_RANGE_CUSTOM = re.compile(
-    rf"{_DATE_POINT}\s*[-–—]\s*{_DATE_POINT_OPEN}",
+    rf"{_DATE_POINT}\s*(?:[-–—]|\bпо\b)\s*{_DATE_POINT_OPEN}",
     re.IGNORECASE,
 )
 
@@ -310,6 +312,23 @@ def _is_description_line(line: str) -> bool:
     if s.endswith(_DESC_ENDS):
         return True
     return False
+
+
+def _normalize_date_range(line: str) -> str:
+    """
+    Reduce a noisy work.ua-style date line to the canonical ``MM.YYYY - MM.YYYY``
+    form.  Handles lines like ``з 12.2024 по 04.2026 (1 рік 5 місяців)`` or
+    ``з 05.2025 по нині (3 місяці)`` by stripping the leading ``з`` marker and
+    the trailing duration comment.  Lines that don't match the pattern are
+    returned unchanged.
+    """
+    m = _DATE_RANGE_WORKUA_LINE.match(line)
+    if not m:
+        return line
+    start = m.group(1)
+    end_raw = m.group(2).strip().lower()
+    end = "до теперішнього часу" if end_raw in ("нині", "дотепер") else m.group(2)
+    return f"{start} - {end}"
 
 
 def _format_job_entry(title: str, company: str, dates: str) -> str:
@@ -439,7 +458,7 @@ def _parse_jobs_from_exp_lines(
     jobs: list[str] = []
 
     for idx, di in enumerate(date_indices):
-        date_str = exp_lines[di].strip()
+        date_str = _normalize_date_range(exp_lines[di].strip())
         prev_di = date_indices[idx - 1] if idx > 0 else -1
         next_di = date_indices[idx + 1] if idx + 1 < len(date_indices) else len(exp_lines)
 
@@ -1168,11 +1187,23 @@ def extract_resume(path: Path) -> ResumeData:
     result.name = _normalize_name(raw_name)
 
     # --- Phone ---
-    for line in all_lines:
+    # Some robota.ua PDF exports put the label and the number on separate
+    # lines (e.g. "Телефон:\n\n093 230-08-53"), so when the captured value
+    # contains no digits, look ahead a couple of lines for the real number.
+    for i, line in enumerate(all_lines):
         m = _PHONE_LABELS.match(line)
-        if m:
-            raw_phone = m.group(1).strip()
-            result.phone = _normalize_phone(raw_phone)
+        if not m:
+            continue
+        raw_phone = m.group(1).strip()
+        if not re.search(r"\d", raw_phone):
+            for nxt in all_lines[i + 1 : i + 4]:
+                nxt = nxt.strip()
+                if nxt and re.search(r"\d", nxt):
+                    raw_phone = nxt
+                    break
+        normalized = _normalize_phone(raw_phone)
+        if re.search(r"\d", normalized):
+            result.phone = normalized
             break
 
     if not result.phone:

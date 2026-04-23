@@ -14,12 +14,12 @@ logger = get_logger(__name__)
 
 COLUMNS: list[str] = [
     "Дата публікації",
+    "ПІБ",
+    "Номер телефону",
+    "Вік",
     "Посада",
     "Досвід роботи",
-    "ПІБ",
-    "Вік",
     "Джерело",
-    "Номер телефону",
 ]
 
 # Header styling
@@ -82,12 +82,12 @@ def build_excel(resumes: list[ResumeData], output_path: Path) -> None:
         )
         values = [
             date_str,
+            resume.name,
+            resume.phone,
+            resume.age,
             resume.positions,
             resume.work_experience,
-            resume.name,
-            resume.age,
             resume.source,
-            resume.phone,
         ]
         for col_idx, value in enumerate(values, start=1):
             cell = ws.cell(row=row_idx, column=col_idx, value=value)
