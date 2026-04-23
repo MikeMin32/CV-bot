@@ -15,6 +15,7 @@ logger = get_logger(__name__)
 COLUMNS: list[str] = [
     "Дата публікації",
     "Посада",
+    "Досвід роботи",
     "ПІБ",
     "Вік",
     "Джерело",
@@ -34,6 +35,7 @@ _MIN_COL_WIDTHS: dict[str, int] = {
     "Вік": 8,
     "Джерело": 16,
     "Номер телефону": 22,
+    "Досвід роботи": 45,
 }
 
 _DATE_SENTINEL = datetime.min
@@ -81,6 +83,7 @@ def build_excel(resumes: list[ResumeData], output_path: Path) -> None:
         values = [
             date_str,
             resume.positions,
+            resume.work_experience,
             resume.name,
             resume.age,
             resume.source,

@@ -23,6 +23,7 @@ class ResumeData:
     phone: str = ""
     age: str = ""
     positions: str = ""
+    work_experience: str = ""
     source: str = ""
     source_file: str = ""
     parsed_at: str = ""
@@ -93,6 +94,250 @@ _EXPERIENCE_SECTION_HEADERS: frozenset[str] = frozenset({
     "work history",
     "career history",
 })
+
+# ---------------------------------------------------------------------------
+# Work-experience extraction helpers
+# ---------------------------------------------------------------------------
+
+# robota.ua / MHTML date range: "MM.YYYY - MM.YYYY", "05.2025 - до теперішнього часу"
+_DATE_RANGE_ROBOTA = re.compile(
+    r"\d{2}\.\d{4}\s*[-–]\s*(?:\d{2}\.\d{4}|до теперішнього часу|наш час)",
+    re.IGNORECASE,
+)
+
+# work.ua DOCX date lines: "з MM.YYYY по MM.YYYY (X років)" / "з MM.YYYY по нині ..."
+_DATE_RANGE_WORKUA_LINE = re.compile(
+    r"^з\s+(\d{2}\.\d{4})\s+по\s+(\S+)",
+    re.IGNORECASE,
+)
+
+# Custom resume date ranges: "DD.MM.YYYY – DD.MM.YYYY" or "YYYY – YYYY"
+_DATE_RANGE_CUSTOM = re.compile(
+    r"(?:\d{2}\.\d{2}\.\d{4}|\d{4})\s*[-–]\s*(?:\d{2}\.\d{2}\.\d{4}|\d{4})",
+)
+
+# Duration-only lines, e.g. "2 роки 3 місяці", "8 місяців"
+_DURATION_LINE = re.compile(
+    r"^\d+\s+(?:рік|роки|років|місяць|місяці|місяців)",
+    re.IGNORECASE,
+)
+
+# robota.ua trigger: "Працювала/Працював в 1 компанії …"
+# Masculine: Працював, Feminine: Працювала, Neutral: Працювало, Plural: Працювали
+_EXPERIENCE_TRIGGER = re.compile(
+    r"Працюва(?:в|ла|ло|ли)\s+в\s+\d+",
+    re.IGNORECASE,
+)
+
+# Lines that mark the end of the experience section in robota.ua pages
+_ROBOTA_EXP_STOP: frozenset[str] = frozenset({
+    "ключова інформація",
+    "навчалась в",
+    "навчався в",
+    "навчувся в",
+    "освіта",
+    "написати в чат",
+    "завантажити",
+    "найсвіжішу версію резюме",
+    "кандидат з найбільшої бази",
+    "до переліку резюме",
+    "володіє мовами",
+})
+
+# Lines that mark the end of the experience section in custom PDFs
+_CUSTOM_EXP_STOP: frozenset[str] = frozenset({
+    "освіта",
+    "навички",
+    "контактна інформація",
+    "мови",
+    "про себе",
+    "про мене",
+    "summary",
+    "education",
+    "skills",
+})
+
+
+def _is_exp_noise(line: str) -> bool:
+    """Return True for lines that carry no job-entry information."""
+    if not line or line == "⬥":
+        return True
+    cl = re.sub(r"&\w+;", " ", line).lower().strip()
+    if any(cl.startswith(m) for m in _ROBOTA_EXP_STOP):
+        return True
+    if line.startswith("http") or "viber://" in line or "t.me/" in line:
+        return True
+    if _DURATION_LINE.match(line):
+        return True
+    if re.match(r"^\d+$", line):      # bare numeric IDs
+        return True
+    return False
+
+
+def _format_job_entry(title: str, company: str, dates: str) -> str:
+    parts = [p.strip() for p in [title, company] if p.strip()]
+    text = ", ".join(parts)
+    if dates.strip():
+        text += f" ({dates.strip()})"
+    return text
+
+
+def _parse_jobs_from_exp_lines(
+    exp_lines: list[str],
+    date_re: re.Pattern,
+) -> str:
+    """
+    Shared engine: given cleaned experience lines and a date-range regex,
+    extract (title, company, dates) for every job using a window + dedup
+    approach.
+
+    For each date-range line, the window [prev_date+1 … di-1] is filtered for
+    noise, then deduplicated (first occurrence kept).  After dedup the last two
+    items are title and company.  If the last item contains '|' it is treated as
+    a combined "title|company" entry.  If there are ≥ 3 items the first one is
+    treated as the industry label and, when the company ends with it, the label
+    is stripped from the company string.
+    """
+    date_indices = [i for i, l in enumerate(exp_lines) if date_re.search(l)]
+    if not date_indices:
+        return ""
+
+    jobs: list[str] = []
+    for idx, di in enumerate(date_indices):
+        date_str = exp_lines[di].strip()
+        prev_date = date_indices[idx - 1] if idx > 0 else -1
+
+        # Collect non-noise lines in the window, preserving forward order
+        raw: list[str] = []
+        for j in range(prev_date + 1, di):
+            l = exp_lines[j].strip()
+            if not _is_exp_noise(l):
+                raw.append(l)
+
+        # Deduplicate keeping first occurrence (this removes MHTML industry repeats)
+        seen: set[str] = set()
+        deduped: list[str] = []
+        for l in raw:
+            if l not in seen:
+                seen.add(l)
+                deduped.append(l)
+
+        if not deduped:
+            continue
+
+        last = deduped[-1]
+
+        # "Title|Company" combined line (e.g. some custom resumes)
+        if "|" in last:
+            parts = last.split("|", 1)
+            title, company = parts[0].strip(), parts[1].strip()
+        elif len(deduped) == 1:
+            title, company = last, ""
+        else:
+            title = deduped[-2]
+            company = last
+            # Strip trailing industry label from company (robota.ua PDF format)
+            if len(deduped) >= 3:
+                industry = deduped[-3]
+                if company.endswith(industry):
+                    company = company[: -len(industry)].strip()
+
+        if title:
+            jobs.append(_format_job_entry(title, company, date_str))
+
+    return "\n".join(jobs)
+
+
+def _extract_work_experience_from_blocks(blocks: list[TextBlock]) -> str:
+    """
+    Extract work experience from work.ua DOCX-style blocks.
+    Uses paragraph heading styles (Heading 2 / Heading 3) as structural markers.
+    """
+    jobs: list[str] = []
+    in_exp = False
+    current_title = ""
+
+    for block in blocks:
+        text = block.text.strip()
+        lower = text.lower()
+        style = block.style
+
+        if style == "Heading 2":
+            if lower == "досвід роботи":
+                in_exp = True
+                continue
+            if in_exp:
+                break   # next Heading 2 ends the experience section
+
+        if not in_exp:
+            continue
+
+        if style == "Heading 3":
+            current_title = text
+        elif style == "Normal" and current_title:
+            lines = [l.strip() for l in text.splitlines() if l.strip()]
+            date_line = lines[0] if lines else ""
+            company = lines[1] if len(lines) > 1 else ""
+            m = _DATE_RANGE_WORKUA_LINE.match(date_line)
+            if m:
+                start = m.group(1)
+                end_raw = m.group(2).lower()
+                end = "до теперішнього часу" if end_raw == "нині" else m.group(2)
+                date_str = f"{start} - {end}"
+            else:
+                date_str = date_line
+            jobs.append(_format_job_entry(current_title, company, date_str))
+            current_title = ""
+
+    return "\n".join(jobs)
+
+
+def _extract_work_experience_robota(all_lines: list[str]) -> str:
+    """
+    Extract work experience from robota.ua all_lines (PDF or MHTML).
+    Triggered by "Працював(а) в N компанії/компаніях …".
+    """
+    trigger_idx = None
+    for i, line in enumerate(all_lines):
+        clean = re.sub(r"&\w+;", " ", line).strip()
+        if _EXPERIENCE_TRIGGER.search(clean):
+            trigger_idx = i + 1
+            break
+    if trigger_idx is None:
+        return ""
+
+    exp_lines: list[str] = []
+    for line in all_lines[trigger_idx:]:
+        cl = re.sub(r"&\w+;", " ", line).lower().strip()
+        if any(cl.startswith(m) for m in _ROBOTA_EXP_STOP):
+            break
+        exp_lines.append(line.strip())
+
+    return _parse_jobs_from_exp_lines(exp_lines, _DATE_RANGE_ROBOTA)
+
+
+def _extract_work_experience_custom(all_lines: list[str]) -> str:
+    """
+    Extract work experience from non-platform PDFs that use a plain
+    'ДОСВІД РОБОТИ' section header.
+    """
+    trigger_idx = None
+    for i, line in enumerate(all_lines):
+        if line.strip().lower() in ("досвід роботи", "experience", "work experience"):
+            trigger_idx = i + 1
+            break
+    if trigger_idx is None:
+        return ""
+
+    exp_lines: list[str] = []
+    for line in all_lines[trigger_idx:]:
+        cl = line.strip().lower()
+        if any(cl.startswith(m) for m in _CUSTOM_EXP_STOP):
+            break
+        exp_lines.append(line.strip())
+
+    return _parse_jobs_from_exp_lines(exp_lines, _DATE_RANGE_CUSTOM)
+
 
 # Age value patterns
 _AGE_VALUE = re.compile(r"(\d{1,3})\s*(?:\xa0|\s)*(?:рік|роки|років|years?|год)", re.IGNORECASE)
@@ -477,6 +722,17 @@ def extract_resume(path: Path) -> ResumeData:
         except Exception as exc:
             logger.warning("Position extraction failed for %s: %s", path.name, exc)
 
+    # --- Work experience ---
+    try:
+        if suffix == ".docx":
+            result.work_experience = _extract_work_experience_from_blocks(blocks)
+        elif result.source == "robota.ua":
+            result.work_experience = _extract_work_experience_robota(all_lines)
+        else:
+            result.work_experience = _extract_work_experience_custom(all_lines)
+    except Exception as exc:
+        logger.warning("Work experience extraction failed for %s: %s", path.name, exc)
+
     # --- Publication date ---
     if suffix in (".mhtml", ".mht") and doc.raw_date_hint:
         try:
@@ -494,9 +750,11 @@ def extract_resume(path: Path) -> ResumeData:
                 result.publication_date = d
                 break
 
+    exp_preview = result.work_experience.replace("\n", " | ")[:80] if result.work_experience else "—"
     logger.info(
-        "Extracted | file=%s name=%r phone=%r age=%r source=%r date=%s",
+        "Extracted | file=%s name=%r phone=%r age=%r source=%r date=%s exp=%r",
         path.name, result.name, result.phone, result.age, result.source,
         result.publication_date.strftime("%Y-%m-%d") if result.publication_date else "—",
+        exp_preview,
     )
     return result
