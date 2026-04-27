@@ -56,26 +56,40 @@ async def handle_document(message: Message, bot: Bot) -> None:
         )
         return
 
-    # Persist to disk
-    config.ensure_upload_dir()
-    save_dir = config.UPLOAD_DIR / str(user_id)
-    save_dir.mkdir(parents=True, exist_ok=True)
-
-    # Use original filename; make it unique if duplicate
-    dest = save_dir / _unique_name(save_dir, file_name)
-
-    try:
-        tg_file = await bot.get_file(doc.file_id)
-        await bot.download_file(tg_file.file_path, destination=str(dest))  # type: ignore[arg-type]
-    except Exception as exc:
-        logger.error("Download failed for %s (user=%d): %s", file_name, user_id, exc)
-        await message.answer("❌ Не удалось загрузить файл. Попробуйте ещё раз.")
-        return
-
-    # Serialize append + count + confirmation per user to keep the queue counter consistent
+    # Serialize the entire save sequence per user.  Work.ua exports tend to
+    # share the same filename across different candidates (e.g.
+    # "Workua_резюме_..._<vacancy_id>.docx"), so concurrent handlers would
+    # otherwise race on `path.exists()` checks and write to the same
+    # destination simultaneously, corrupting the .docx (`Bad magic number for
+    # central directory`).  Per-user serialization ensures one file is
+    # written at a time so each upload gets its own distinct path on disk.
     if user_id not in _user_locks:
         _user_locks[user_id] = asyncio.Lock()
+
     async with _user_locks[user_id]:
+        config.ensure_upload_dir()
+        save_dir = config.UPLOAD_DIR / str(user_id)
+        save_dir.mkdir(parents=True, exist_ok=True)
+
+        # Work.ua exports often share the same filename across different
+        # candidates (the name is built from the vacancy, not the candidate),
+        # so we *must* save to a distinct path on disk to avoid overwriting
+        # previously uploaded resumes.  The suffix is only visible internally;
+        # the user always sees the original filename in the confirmation.
+        dest = save_dir / _unique_name(save_dir, file_name)
+
+        try:
+            tg_file = await bot.get_file(doc.file_id)
+            await bot.download_file(tg_file.file_path, destination=str(dest))  # type: ignore[arg-type]
+        except Exception as exc:
+            logger.error("Download failed for %s (user=%d): %s", file_name, user_id, exc)
+            try:
+                dest.unlink(missing_ok=True)
+            except Exception:
+                pass
+            await message.answer("❌ Не удалось загрузить файл. Попробуйте ещё раз.")
+            return
+
         _sessions.setdefault(user_id, []).append(dest)
         count = len(_sessions[user_id])
 
@@ -190,7 +204,14 @@ async def handle_finish(message: Message, bot: Bot) -> None:
 # ---------------------------------------------------------------------------
 
 def _unique_name(directory: Path, filename: str) -> str:
-    """Append a counter suffix if a file with the same name already exists."""
+    """Return a filename that doesn't clash with anything in ``directory``.
+
+    Appends ``_1``, ``_2``, … to the stem until a free name is found.  Safe
+    to call without external locking only when the caller holds a per-user
+    lock around the subsequent file creation, since two concurrent calls can
+    otherwise return the same name before either has written to disk.  In
+    this module that guarantee is provided by ``_user_locks[user_id]``.
+    """
     stem = Path(filename).stem
     suffix = Path(filename).suffix
     candidate = filename
