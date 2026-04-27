@@ -8,7 +8,8 @@ from pathlib import Path
 from aiogram import Bot, F, Router
 from aiogram.types import BufferedInputFile, Document, Message
 
-from bot.keyboards.common import FINISH_TEXT
+from bot.keyboards.common import CLEAR_TEXT, FINISH_TEXT
+from bot.keyboards.common import main_keyboard
 from core.config import config
 from core.logging import get_logger
 from services.excel_exporter import build_excel
@@ -22,6 +23,9 @@ _sessions: dict[int, list[Path]] = {}
 
 # Tracks message_ids of "Файл загружен" confirmations per user for cleanup
 _confirm_message_ids: dict[int, list[int]] = {}
+
+# Per-user locks to serialize count-update + confirmation messages (prevents race conditions)
+_user_locks: dict[int, asyncio.Lock] = {}
 
 MAX_FILE_BYTES = config.MAX_FILE_SIZE_MB * 1024 * 1024
 
@@ -68,16 +72,39 @@ async def handle_document(message: Message, bot: Bot) -> None:
         await message.answer("❌ Не удалось загрузить файл. Попробуйте ещё раз.")
         return
 
-    _sessions.setdefault(user_id, []).append(dest)
-    count = len(_sessions[user_id])
+    # Serialize append + count + confirmation per user to keep the queue counter consistent
+    if user_id not in _user_locks:
+        _user_locks[user_id] = asyncio.Lock()
+    async with _user_locks[user_id]:
+        _sessions.setdefault(user_id, []).append(dest)
+        count = len(_sessions[user_id])
 
-    logger.info("Saved file: %s (user=%d, session_count=%d)", dest.name, user_id, count)
+        logger.info("Saved file: %s (user=%d, session_count=%d)", dest.name, user_id, count)
 
-    confirm = await message.answer(
-        f"Файл загружен: <b>{file_name}</b> (в очереди: {count})",
+        confirm = await message.answer(
+            f"Файл загружен: <b>{file_name}</b> (в очереди: {count})",
+            parse_mode="HTML",
+        )
+        _confirm_message_ids.setdefault(user_id, []).append(confirm.message_id)
+
+
+# ---------------------------------------------------------------------------
+# Clear queue handler
+# ---------------------------------------------------------------------------
+
+@router.message(F.text == CLEAR_TEXT)
+async def handle_clear(message: Message, bot: Bot) -> None:
+    user_id = message.from_user.id  # type: ignore[union-attr]
+    confirm_ids = _confirm_message_ids.pop(user_id, [])
+    _sessions.pop(user_id, None)
+    _user_locks.pop(user_id, None)
+    _cleanup_user_dir(user_id)
+    await _delete_confirm_messages(bot, message.chat.id, confirm_ids)
+    await message.answer(
+        "🗑 Очередь очищена. Можно загружать файлы заново.",
         parse_mode="HTML",
+        reply_markup=main_keyboard(),
     )
-    _confirm_message_ids.setdefault(user_id, []).append(confirm.message_id)
 
 
 # ---------------------------------------------------------------------------
@@ -190,3 +217,15 @@ def _cleanup_user_dir(user_id: int) -> None:
         logger.info("Cleaned up temp dir for user=%d", user_id)
     except Exception as exc:
         logger.warning("Cleanup failed for user=%d: %s", user_id, exc)
+
+
+# ---------------------------------------------------------------------------
+# Public reset helper (used by /start to clear stale sessions)
+# ---------------------------------------------------------------------------
+
+def pop_user_session(user_id: int) -> list[int]:
+    """Clear in-memory session and return confirm message_ids for deletion."""
+    _sessions.pop(user_id, None)
+    _user_locks.pop(user_id, None)
+    _cleanup_user_dir(user_id)
+    return _confirm_message_ids.pop(user_id, [])
