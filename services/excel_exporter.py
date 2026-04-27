@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from datetime import datetime
 from pathlib import Path
 
 from openpyxl import Workbook
@@ -38,9 +37,6 @@ _MIN_COL_WIDTHS: dict[str, int] = {
     "Досвід роботи": 45,
 }
 
-_DATE_SENTINEL = datetime.min
-
-
 def _auto_fit_column(ws, col_idx: int, header: str, values: list[str]) -> None:
     letter = get_column_letter(col_idx)
     max_len = max(
@@ -51,14 +47,11 @@ def _auto_fit_column(ws, col_idx: int, header: str, values: list[str]) -> None:
 
 
 def build_excel(resumes: list[ResumeData], output_path: Path) -> None:
-    """Write a list of ResumeData objects to an .xlsx file, sorted oldest-first."""
-    # Sort: resumes with a known date come first (oldest → newest);
-    # resumes without a date are appended at the end.
-    sorted_resumes = sorted(
-        resumes,
-        key=lambda r: (r.publication_date is None, r.publication_date or _DATE_SENTINEL),
-    )
+    """Write a list of ResumeData objects to an .xlsx file.
 
+    Rows are written in the same order as the input list, which is the order
+    in which the user uploaded the resumes.
+    """
     wb = Workbook()
     ws = wb.active
     ws.title = "Candidates"
@@ -74,7 +67,7 @@ def build_excel(resumes: list[ResumeData], output_path: Path) -> None:
 
     # Write data rows
     row_values: dict[str, list[str]] = {col: [] for col in COLUMNS}
-    for row_idx, resume in enumerate(sorted_resumes, start=2):
+    for row_idx, resume in enumerate(resumes, start=2):
         date_str = (
             resume.publication_date.strftime("%d.%m.%Y")
             if resume.publication_date
@@ -100,4 +93,4 @@ def build_excel(resumes: list[ResumeData], output_path: Path) -> None:
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     wb.save(str(output_path))
-    logger.info("Excel saved: %s (%d rows)", output_path, len(sorted_resumes))
+    logger.info("Excel saved: %s (%d rows)", output_path, len(resumes))

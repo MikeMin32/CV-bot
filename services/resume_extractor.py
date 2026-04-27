@@ -57,7 +57,7 @@ _SECTION_HEADERS: frozenset[str] = frozenset({
 
 # Labels that appear before the value with a tab or colon
 _PHONE_LABELS = re.compile(
-    r"(?:телефон|phone|мобільний|tel\.?)\s*:?\t?(.+)",
+    r"(?:телефон|phone|мобільний|tel\.?|тел\.?)\s*:?\t?(.+)",
     re.IGNORECASE,
 )
 _AGE_LABELS = re.compile(
@@ -106,6 +106,7 @@ _SIDE_HEADERS: frozenset[str] = frozenset({
     "контакти",
     "контактна інформація",
     "контактні дані",
+    "контакт",
     "зайнятість",
     "освіта",
     "додаткова освіта",
@@ -118,6 +119,7 @@ _SIDE_HEADERS: frozenset[str] = frozenset({
     "мови",
     "мова",
     "знання мов",
+    "соціальні мережі",
     "хобі",
     "інтереси",
     "професійні якості",
@@ -134,6 +136,12 @@ _SIDE_HEADERS: frozenset[str] = frozenset({
     "що я вмію",
     "резюме",
     "контакти:",
+    "профіль",
+    "профайл",
+    "summary",
+    "profile",
+    "about",
+    "about me",
 })
 
 # All-caps section headers that should never be treated as candidate names.
@@ -146,6 +154,7 @@ _NOT_NAME_HEADERS: frozenset[str] = frozenset({
     "про себе",
     "про мене",
     "контакти",
+    "контакт",
     "контактна інформація",
     "короткий зміст",
     "мова",
@@ -162,6 +171,13 @@ _NOT_NAME_HEADERS: frozenset[str] = frozenset({
     "що я вмію",
     "ключова інформація",
     "ключові навички",
+    "профіль",
+    "профайл",
+    "соціальні мережі",
+    "summary",
+    "profile",
+    "about",
+    "about me",
 })
 
 # ---------------------------------------------------------------------------
@@ -183,12 +199,22 @@ _DATE_RANGE_WORKUA_LINE = re.compile(
 # Abbreviated Ukrainian month names used by many custom resume builders.
 _UA_SHORT_MONTH = r"(?:січ|лют|бер|квіт|трав|черв|лип|серп|вер|жовт|лист|груд)"
 
-# A single date endpoint: DD.MM.YYYY, MM.YYYY, YYYY, or "мес YYYY".
+# Full Ukrainian month names (nominative) used in custom/uploaded resumes.
+_UA_LONG_MONTH = (
+    r"(?:січень|лютий|березень|квітень|травень|червень"
+    r"|липень|серпень|вересень|жовтень|листопад|грудень)"
+)
+
+# A single date endpoint: DD.MM.YYYY, MM.YYYY, M/YYYY, YYYY, "мес YYYY", or "Місяць YYYY".
+# The ``M/YYYY`` form (e.g. ``9/2019``) is used by many Canva-style templates
+# where months are written without a leading zero and separated by ``/``.
 _DATE_POINT = (
     rf"(?:\d{{2}}\.\d{{2}}\.\d{{4}}"
-    rf"|\d{{2}}\.\d{{4}}"
+    rf"|\d{{1,2}}\.\d{{4}}"
+    rf"|\d{{1,2}}/\d{{4}}"
     rf"|\d{{4}}"
-    rf"|{_UA_SHORT_MONTH}\s+\d{{4}})"
+    rf"|{_UA_SHORT_MONTH}\s+\d{{4}}"
+    rf"|{_UA_LONG_MONTH}\s+\d{{4}})"
 )
 
 # Open-ended / ongoing markers that can appear on the right side of a range.
@@ -196,6 +222,7 @@ _DATE_POINT_OPEN = (
     rf"(?:{_DATE_POINT}"
     r"|Нинішній"
     r"|нині"
+    r"|дотепер"
     r"|теперішній\s+час"
     r"|до\s+теперішнього\s+часу"
     r"|наш\s+час"
@@ -458,7 +485,19 @@ def _parse_jobs_from_exp_lines(
     jobs: list[str] = []
 
     for idx, di in enumerate(date_indices):
-        date_str = _normalize_date_range(exp_lines[di].strip())
+        line_text = exp_lines[di].strip()
+
+        # Inline format: "Місяць YYYY – Місяць YYYY   Назва посади / Компанія"
+        # Detect when significant non-date text follows the date range on the same line.
+        dm = date_re.search(line_text)
+        if dm:
+            inline = re.sub(r"[ \t]+", " ", line_text[dm.end():]).strip().lstrip("—–-").strip()
+            # Exclude bare duration strings like "(5 місяців)" and noise.
+            if inline and not inline.startswith("(") and len(inline) > 3 and not _is_exp_noise(inline):
+                jobs.append(_format_job_entry(inline, "", dm.group(0)))
+                continue
+
+        date_str = _normalize_date_range(line_text)
         prev_di = date_indices[idx - 1] if idx > 0 else -1
         next_di = date_indices[idx + 1] if idx + 1 < len(date_indices) else len(exp_lines)
 
@@ -591,6 +630,11 @@ _CUSTOM_EXP_TRIGGERS: frozenset[str] = frozenset({
     "зайнятість",
     "робочий досвід",
     "професійний досвід",
+    "останній досвід роботи",
+    "попередній досвід роботи",
+    "трудовий досвід",
+    "місця роботи",
+    "місця праці",
 })
 
 
@@ -853,6 +897,23 @@ _NAME_WORD_UPPER = re.compile(r"^[А-ЯЁЇІЄA-Z]{2,}(?:['ʼ\-][А-ЯЁЇІЄA
 # Single uppercase letter — robota.ua privacy-shortened surname (e.g. "Дарія Ч").
 _NAME_WORD_INITIAL = re.compile(r"^[А-ЯЁЇІЄA-Z]$")
 
+# Language proficiency words that should never be treated as a surname when
+# they sit on the same line as a language name (e.g. "Українська\tРідна",
+# "English\tFluent", "Deutsch\tСередній").
+_LANG_PROFICIENCY: frozenset[str] = frozenset({
+    "рідна", "рідний", "рідною",
+    "вільно", "вільна", "вільний", "вільне",
+    "середній", "середня", "середнє",
+    "базовий", "базова", "базове",
+    "початковий", "початкова", "початкове",
+    "розмовний", "розмовна", "розмовне",
+    "технічний", "технічна",
+    "вище середнього", "нижче середнього",
+    "native", "fluent", "intermediate", "basic", "beginner",
+    "advanced", "elementary", "proficient", "conversational",
+    "a1", "a2", "b1", "b2", "c1", "c2",
+})
+
 
 def _looks_like_name(text: str) -> bool:
     """Heuristic: 2–4 words that look like Cyrillic/Latin name parts."""
@@ -867,6 +928,9 @@ def _looks_like_name(text: str) -> bool:
     for w in words:
         if not (_NAME_WORD_MIXED.match(w) or _NAME_WORD_UPPER.match(w) or _NAME_WORD_INITIAL.match(w)):
             return False
+    # Reject "<Language> <Proficiency>" rows from a language-skills table.
+    if words[-1].lower() in _LANG_PROFICIENCY:
+        return False
     return True
 
 
@@ -1053,6 +1117,52 @@ def _position_from_filename(filename: str, name: str) -> str:
     return ""
 
 
+def _name_from_filename(filename: str) -> str:
+    """
+    Best-effort extraction of the candidate's name from common filename
+    conventions used by Ukrainian job boards and users exporting from them:
+
+    • work.ua / Telegram-shared variant:
+      ``Резюме_—_<Position>,_<Name>.<ext>`` →  ``<Name>``
+      (the trailing comma-separated piece must look like a person name).
+    • robota.ua:  ``<Position>_<Name>_id_<digits>_robota[_ua].pdf`` →
+      the trailing 2–4-word run that looks like a name.
+
+    Returns an empty string when no plausible name can be derived.
+    """
+    if not filename:
+        return ""
+    stem = filename
+    for ext in (".pdf", ".PDF", ".docx", ".DOCX", ".mhtml", ".mht"):
+        if stem.endswith(ext):
+            stem = stem[: -len(ext)]
+            break
+
+    # work.ua-style: trailing comma-separated piece is the name.
+    if stem.lower().startswith("резюме"):
+        body = re.sub(r"^резюме\s*[_\s]*[—–\-]\s*[_\s]*", "",
+                      stem, count=1, flags=re.IGNORECASE)
+        body = body.replace("_", " ").strip()
+        parts = [p.strip() for p in body.split(",") if p.strip()]
+        if len(parts) >= 2 and _looks_like_name(parts[-1]):
+            return parts[-1]
+        return ""
+
+    # robota.ua-style: take the trailing 2–3 capitalized words from the body.
+    m = _ROBOTA_FILENAME_RE.match(stem)
+    if m:
+        body = m.group("body").replace("_", " ").strip()
+        words = body.split()
+        for n in (3, 2):
+            if len(words) >= n:
+                tail = " ".join(words[-n:])
+                if _looks_like_name(tail):
+                    return tail
+        return ""
+
+    return ""
+
+
 def _collect_positions(blocks: list[TextBlock]) -> list[str]:
     """
     Collect ONLY the candidate's target / desired / current position.
@@ -1083,7 +1193,7 @@ def _collect_positions(blocks: list[TextBlock]) -> list[str]:
                 in_experience_section = True
                 continue
             # Any other known section header: just skip the header line itself.
-            if lower in _SECTION_HEADERS:
+            if lower in _SECTION_HEADERS or lower in _SIDE_HEADERS:
                 continue
 
         # ── Freeze once inside the experience section ─────────────────────────
@@ -1092,9 +1202,14 @@ def _collect_positions(blocks: list[TextBlock]) -> list[str]:
 
         # ── Source 1: Heading 1 resume title ─────────────────────────────────
         if style == "Heading 1":
-            if text not in positions:
-                positions.insert(0, text)
-            headline_captured = True
+            # Skip Heading 1 blocks that are actually work-experience entries
+            # (some custom DOCX templates use Heading 1 for date+job lines).
+            if _DATE_RANGE_CUSTOM.search(text) or _DATE_RANGE_WORKUA_LINE.search(text):
+                continue
+            if not headline_captured:
+                if text not in positions:
+                    positions.insert(0, text)
+                headline_captured = True
             continue
 
         # ── Source 3: first non-section Heading 2 (professional headline) ────
@@ -1118,6 +1233,91 @@ def _collect_positions(blocks: list[TextBlock]) -> list[str]:
 # ---------------------------------------------------------------------------
 # Main extractor
 # ---------------------------------------------------------------------------
+
+# Phrases that strongly indicate an education entry rather than employment.
+# Includes activity verbs (``навчалась``, ``закінчила``…), academic markers
+# (``5 курс``, ``семестр``…) and the diploma-level phrases that work.ua puts
+# next to the date range on free-form education lines (``Середня спеціальна``,
+# ``Вища освіта``, ``Базова загальна`` …).
+_EDUCATION_INLINE_SIGNALS = re.compile(
+    r"(?:навчал(?:ась|ася|ося|ися|ись)|закінчил(?:а|ав|и)|здобув(?:аю|ає)?"
+    r"|(?:1|2|3|4|5)\s+курс|семестр|залік|іспит"
+    r"|вища\s+освіта|середня\s+освіта|середня\s+спеціальна"
+    r"|базова\s+(?:загальна|середня)|повна\s+загальна"
+    r"|бакалавр|магістр|аспірант)",
+    re.IGNORECASE,
+)
+
+# A "before-date" segment that ends with a date-introducer word (e.g. "з",
+# "від", "with", "from") is almost certainly the tail of a "з YYYY по YYYY"
+# date phrase rather than a job title.  We strip such suffixes before
+# evaluating the candidate text so a line like "Середня спеціальна, з 2022
+# по 2025" is rejected by ``_EDUCATION_INLINE_SIGNALS``.
+_DATE_INTRODUCER_TAIL = re.compile(
+    r",?\s*(?:з|від|from|with)\s*$",
+    re.IGNORECASE,
+)
+
+
+def _extract_work_experience_inline(all_lines: list[str]) -> str:
+    """
+    Last-resort extractor for custom CVs that lack any standard trigger header.
+
+    Captures job entries where the date range and the job identifier appear
+    on the *same line* — both layouts are supported:
+
+      • ``Серпень 2025 – Назва компанії``    (date precedes the title)
+      • ``Кальянний майстер\\t9/2019-8/2022`` (title precedes the date)
+
+    Pure date-only lines are skipped so that education / birth dates do not
+    produce false work-experience entries.  Lines whose only inline text
+    matches an education-specific phrase (e.g. ``навчалась``, ``5 курс``)
+    are also rejected.
+    """
+    jobs: list[str] = []
+    seen: set[str] = set()
+    for line in all_lines:
+        text = line.strip()
+        m = _DATE_RANGE_CUSTOM.search(text)
+        if not m:
+            continue
+
+        before = re.sub(r"[ \t]+", " ", text[: m.start()]).strip().rstrip("—–-:").strip()
+        after = re.sub(r"[ \t]+", " ", text[m.end():]).strip().lstrip("—–-:").strip()
+        # Strip a trailing date-introducer (", з") so the education-signal
+        # check sees the actual head phrase ("Середня спеціальна") rather
+        # than a half-cut connector that masks it.
+        before_clean = _DATE_INTRODUCER_TAIL.sub("", before).strip().rstrip(",").strip()
+
+        def _viable(candidate: str) -> bool:
+            if not candidate or len(candidate) <= 3:
+                return False
+            if candidate.startswith("("):
+                return False
+            if _is_exp_noise(candidate):
+                return False
+            if _EDUCATION_INLINE_SIGNALS.search(candidate):
+                return False
+            return True
+
+        # Prefer the title that sits BEFORE the date (Title\tDate layout).
+        # Fall back to the AFTER-date text only when the line lacks a leading
+        # title, e.g. "Серпень 2025 – Назва компанії".
+        title = ""
+        if _viable(before_clean):
+            title = before_clean
+        elif _viable(after):
+            title = after
+        if not title:
+            continue
+
+        entry = _format_job_entry(title, "", m.group(0))
+        if entry in seen:
+            continue
+        seen.add(entry)
+        jobs.append(entry)
+    return "\n".join(jobs)
+
 
 def _read_mhtml_position(blocks: list[TextBlock]) -> str:
     """
@@ -1177,7 +1377,8 @@ def extract_resume(path: Path) -> ResumeData:
             raw_name = name
             break
 
-    # Fallback: first line that looks like a name (skip service lines)
+    # Fallback: first line that looks like a name (skip service lines).
+    # Also handles "Прізвище Ім'я\tМісто, Адреса" (custom DOCX template).
     if not raw_name:
         skip_prefixes = ("сервіс", "резюме", "http", "www", "кандидат")
         for line in all_lines:
@@ -1186,6 +1387,19 @@ def extract_resume(path: Path) -> ResumeData:
             if _looks_like_name(line):
                 raw_name = line
                 break
+            # Try just the part before a tab (Name\tCity, Address)
+            if "\t" in line:
+                before_tab = line.split("\t")[0].strip()
+                if _looks_like_name(before_tab):
+                    raw_name = before_tab
+                    break
+
+    # Last resort: derive the name from the filename ("Резюме — <Position>,
+    # <Name>.docx" and similar conventions).  Triggered when the document
+    # body has no recognisable name line — common for free-form templates
+    # where the candidate's name appears only in the header image.
+    if not raw_name:
+        raw_name = _name_from_filename(path.name)
 
     # Store the canonical (Title Case) form, but keep ``raw_name`` for lookups
     # so that ALL-CAPS resumes still match the exact line in the document.
@@ -1300,6 +1514,13 @@ def extract_resume(path: Path) -> ResumeData:
     try:
         if suffix == ".docx":
             result.work_experience = _extract_work_experience_from_blocks(blocks)
+            # Custom / uploaded DOCX files often lack work.ua's Heading 2/3 structure;
+            # fall back to the generic line-based extractor in that case.
+            if not result.work_experience:
+                result.work_experience = _extract_work_experience_custom(all_lines)
+            # Last resort: inline date+job on same line (e.g. "Серпень 2025 – Компанія")
+            if not result.work_experience:
+                result.work_experience = _extract_work_experience_inline(all_lines)
         elif result.source == "robota.ua":
             # Classic robota.ua export (MHTML / legacy PDF) uses the
             # "Працював(а) в N компанії…" trigger.  Newer robota.ua PDF
