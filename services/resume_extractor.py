@@ -23,6 +23,7 @@ class ResumeData:
     phone: str = ""
     age: str = ""
     positions: str = ""
+    employment_type: str = ""
     work_experience: str = ""
     source: str = ""
     source_file: str = ""
@@ -1333,6 +1334,325 @@ def _read_mhtml_position(blocks: list[TextBlock]) -> str:
     return lines[1] if len(lines) >= 2 else ""
 
 
+# ---------------------------------------------------------------------------
+# Employment-type extraction
+# ---------------------------------------------------------------------------
+#
+# Detects which employment types the candidate is looking for:
+#   • Повна зайнятість    (full-time / "повний робочий день" / "повна ставка")
+#   • Неповна зайнятість  (part-time / "часткова зайнятість" / "підробіток")
+#   • Віддалена робота    (remote / дистанційна / "робота з дому")
+#   • Проектна робота     (project-based)
+#
+# Two complementary passes make this robust across both template-driven
+# resumes (work.ua / robota.ua) and free-form custom CVs:
+#
+#   1. *Label-anchored*: when a line starts with a label such as
+#      ``Зайнятість``, ``Тип зайнятості``, ``Графік``, ``Готова до``,
+#      ``Готовий працювати`` we collect the value tail (same line plus the
+#      following 1–4 non-empty lines, until the next section/header) and
+#      apply looser single-word patterns.  This catches concise lists like
+#      ``Зайнятість: повна, неповна, віддалено``.
+#
+#   2. *Global*: strict, contextually-unambiguous full-phrase patterns are
+#      applied to the whole document text.  This catches mentions in
+#      free-form summaries (``шукаю віддалену роботу на повну ставку``)
+#      and in robota.ua MHTML output that lacks explicit labels.
+
+# Header / inline label that introduces employment-type information.
+# Matched at the start of a stripped line.  The ``зайнят(?:і|о)ст`` pattern
+# accepts both nominative (``зайнятість``) and oblique-case (``зайнятості``,
+# ``зайнятістю``) forms, since the stem vowel shifts ``і → о`` in genitive /
+# dative / locative.  The qualifier covers ``Вид/Тип/Форма (зайнятості)``,
+# ``Бажана/Желаемая (форма) зайнятості`` and the Russian counterparts.
+_EMPLOYMENT_LABEL_QUALIFIER = (
+    r"(?:"
+    r"(?:вид|тип|форма|форм[аи])\s+"
+    r"|бажан(?:а|ий|у|ою)\s+(?:(?:вид|тип|форм[аи])\s+)?"
+    r"|желаем(?:ый|ая|ого|ую)\s+(?:(?:вид|тип|форм[аы])\s+)?"
+    r"|предпочтительн\w+\s+(?:(?:вид|тип|форм[аы])\s+)?"
+    r")?"
+)
+
+# TYPE-style labels — directly describe employment type
+# (``Вид зайнятості: повна, неповна``, ``Графік: позмінний``,
+# ``Employment type: Full-time``).  Their value tail is trusted as a
+# definitive list of preferred employment types.
+_EMPLOYMENT_TYPE_LABEL_PREFIX = re.compile(
+    r"^(?:"
+    rf"{_EMPLOYMENT_LABEL_QUALIFIER}зайнят(?:і|о)ст\w*"
+    rf"|{_EMPLOYMENT_LABEL_QUALIFIER}занятост\w*"
+    r"|графік(?:\s+роботи)?"
+    r"|employment(?:\s+type)?"
+    r"|job\s+type"
+    r")\b",
+    re.IGNORECASE,
+)
+
+# LOCATION-style labels — describe WHERE the candidate is willing to work
+# (``Готовий працювати: Вінниця, Дистанційно``).  Such a value mixes city
+# names with the optional remote-work indicator, so we treat it as a
+# preference for *remote* employment ONLY when the value contains nothing
+# but remote indicators.  Whenever a city is listed alongside, the
+# candidate is also open to in-office work, which we prioritise.
+_EMPLOYMENT_LOCATION_LABEL_PREFIX = re.compile(
+    r"^(?:"
+    r"готов(?:ий|а|і|е|ы)?\s+(?:до|працювати|работать|рассмотреть)"
+    r"|розглядаю(?:\s+варіанти)?"
+    r"|рассматриваю(?:\s+варианты)?"
+    r")\b",
+    re.IGNORECASE,
+)
+
+# Recognises a generic "Label: value" / "Label\tvalue" line that signals
+# the start of a *different* field (Місто, Вік, Email, Освіта, Заробітна
+# плата, Адреса …).  Used to stop the look-ahead value scan after an
+# employment-type label so that unrelated content from neighbouring fields
+# doesn't pollute the tail.
+_LABELED_FIELD_LINE = re.compile(
+    r"^[A-ZА-ЯЁЇІЄ][\w''’`\-\s/]{1,40}\s*[:\t]\s*\S",
+    re.UNICODE,
+)
+
+# Strict, contextually-unambiguous patterns — applied to the whole document.
+# Each pair maps a normalized output label to the regex that detects it.
+# Both Ukrainian and Russian forms are supported.  Word boundaries (``\b``)
+# on the leading stem are crucial so that ``неповн`` doesn't accidentally
+# trigger a ``повн`` match inside the negation prefix.
+_EMPLOYMENT_GLOBAL_PATTERNS: list[tuple[str, re.Pattern]] = [
+    ("Повна зайнятість", re.compile(
+        r"\b(?:повн|полн)\w*\s+(?:зайнят|занят)"
+        r"|\b(?:повн|полн)\w*\s+(?:робоч|рабоч)\w*\s+ден\w*"
+        r"|\b(?:повн|полн)\w*\s+ден\w*"
+        r"|\b(?:повн|полн)\w*\s+(?:робоч|рабоч)\w*\s+граф"
+        r"|\b(?:повн|полн)\w*\s+граф"
+        r"|\b(?:повн|полн)\w*\s+ставк"
+        r"|\bfull[\s\-]?time\b",
+        re.IGNORECASE,
+    )),
+    ("Неповна зайнятість", re.compile(
+        r"\b(?:неповн|неполн)\w*\s+(?:зайнят|занят)"
+        r"|\b(?:неповн|неполн)\w*\s+(?:робоч|рабоч)\w*\s+ден\w*"
+        r"|\b(?:неповн|неполн)\w*\s+ден\w*"
+        r"|\b(?:неповн|неполн)\w*\s+граф"
+        r"|\b(?:неповн|неполн)\w*\s+ставк"
+        r"|\b(?:частков|частичн)\w*\s+(?:зайнят|занят)"
+        r"|\b(?:частков|частичн)\w*\s+ставк"
+        r"|\b(?:підробіт|подработ)\w*"
+        r"|\bpart[\s\-]?time\b",
+        re.IGNORECASE,
+    )),
+    ("Віддалена робота", re.compile(
+        r"\b(?:віддален|удал[её]нн|удален)\w*\s+(?:робот|работ|зайнят|занят)"
+        r"|\b(?:дистанційн|дистанционн)\w*\s+(?:робот|работ|зайнят|занят)"
+        r"|\b(?:віддалено|дистанційно|удалённо|удаленно|дистанционно|remote|remotely)\b"
+        r"|\bудал[её]нк\w*\b"
+        r"|\b(?:робот|работ)\w*\s+(?:з|із|на)\s+дом\w*"
+        r"|\b(?:робот|работ)\w*\s+вдома\b"
+        r"|\bwork[\s\-]?from[\s\-]?home\b",
+        re.IGNORECASE,
+    )),
+    ("Проектна робота", re.compile(
+        r"\bпро[єе]ктн\w*\s+(?:робот|зайнят)"
+        r"|\bпроектн\w*\s+(?:работ|занят)",
+        re.IGNORECASE,
+    )),
+]
+
+# Looser patterns — applied only to the value tail directly after a label.
+# In that context single bare words ("повна", "неповна", "віддалено") are
+# sufficient because the label already disambiguates the field.
+_EMPLOYMENT_LABEL_VALUE_PATTERNS: list[tuple[str, re.Pattern]] = [
+    ("Повна зайнятість", re.compile(
+        r"\b(?:повн|полн)\w+\b|full[\s\-]?time", re.IGNORECASE,
+    )),
+    ("Неповна зайнятість", re.compile(
+        r"\b(?:неповн|неполн)\w+\b|\b(?:частков|частичн)\w+\b|part[\s\-]?time"
+        r"|підробіт|подработ",
+        re.IGNORECASE,
+    )),
+    ("Віддалена робота", re.compile(
+        r"\b(?:віддален|удал[её]н|удален|дистанційн|дистанционн)\w*\b"
+        r"|\bremote(?:ly)?\b",
+        re.IGNORECASE,
+    )),
+    ("Проектна робота", re.compile(
+        r"\b(?:про[єе]ктн|проектн)\w*\b", re.IGNORECASE,
+    )),
+]
+
+# Token pattern matching every spelling of the "remote-work" indicator that
+# can appear inside a location-label value (``Готовий працювати: Вінниця,
+# Дистанційно``).  Used to strip remote tokens before checking whether any
+# real city / location name still remains in the value.
+_REMOTE_TOKEN_PATTERN = re.compile(
+    r"\b(?:віддален\w*|дистанційн\w*|удал[её]н\w*|удален\w*|дистанционн\w*"
+    r"|удал[её]нк\w*|remote(?:ly)?|work[\s\-]?from[\s\-]?home)\b",
+    re.IGNORECASE,
+)
+
+# Canonical output order.
+_EMPLOYMENT_ORDER: tuple[str, ...] = (
+    "Повна зайнятість",
+    "Неповна зайнятість",
+    "Віддалена робота",
+    "Проектна робота",
+)
+
+
+def _match_employment_label(line: str) -> tuple[str, str] | None:
+    """If the line starts with an employment-type label, return ``(kind, tail)``.
+
+    ``kind`` is either ``"type"`` (Зайнятість / Графік / Employment type) or
+    ``"location"`` (Готовий працювати / Розглядаю варіанти).  ``tail`` is the
+    trimmed text following the label, or an empty string when the label sits
+    alone on the line (the caller should look at subsequent lines for the
+    value).  Returns ``None`` when the line is not an employment label.
+    """
+    s = line.strip()
+    m = _EMPLOYMENT_TYPE_LABEL_PREFIX.match(s)
+    if m:
+        return ("type", s[m.end():].lstrip(" \t:—–-").strip())
+    m = _EMPLOYMENT_LOCATION_LABEL_PREFIX.match(s)
+    if m:
+        return ("location", s[m.end():].lstrip(" \t:—–-").strip())
+    return None
+
+
+def _detect_employment_in(
+    text: str, patterns: list[tuple[str, re.Pattern]],
+) -> set[str]:
+    return {label for label, pat in patterns if pat.search(text)}
+
+
+def _value_has_non_remote_location(value: str) -> bool:
+    """Return True when a location-label value contains any city / location
+    name beyond the bare remote-work indicator.
+
+    Examples:
+        ``"Вінниця, Дистанційно"``        → True   (city present)
+        ``"Дніпро, Дистанційно, Кам'янське"`` → True   (cities present)
+        ``"Дистанційно"``                 → False  (remote only)
+        ``"віддалено"``                   → False  (remote only)
+        ``""``                            → False  (nothing)
+    """
+    if not value:
+        return False
+    cleaned = _REMOTE_TOKEN_PATTERN.sub(" ", value)
+    cleaned = re.sub(r"\b[мг]\.\s*", "", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"[,;|/\.\(\)\s]+", " ", cleaned).strip()
+    return bool(re.search(r"[А-ЯЁЇІЄA-Z][а-яёїієa-z]+", cleaned))
+
+
+def _find_experience_section_start(all_lines: list[str]) -> int:
+    """Return the index of the first work-experience line, or ``len(all_lines)``
+    when no such section can be located.
+
+    Used to clip employment-type detection to the *header* portion of the
+    resume so that mentions of ``віддалено`` / ``дистанційно`` inside past
+    job titles or descriptions don't get reported as the candidate's
+    preferred employment type.
+    """
+    for i, line in enumerate(all_lines):
+        clean = re.sub(r"&\w+;", " ", line).strip()
+        if _EXPERIENCE_TRIGGER.search(clean):
+            return i
+        cl = line.strip().lower().rstrip(":")
+        if cl in _CUSTOM_EXP_TRIGGERS:
+            return i
+    return len(all_lines)
+
+
+def _extract_employment_type(all_lines: list[str]) -> str:
+    """Detect employment-type preferences declared in the resume.
+
+    Detection is intentionally restricted to the *header* portion of the
+    document (everything BEFORE the work-experience section), so mentions
+    of ``віддалено`` / ``дистанційно`` inside past job titles or duty
+    descriptions never get reported as the candidate's current preference.
+
+    The label-anchored pass takes precedence: when the header contains an
+    explicit ``Вид/Тип/Форма зайнятості`` / ``Графік`` / ``Employment type``
+    (TYPE label) or ``Готов(а) працювати`` / ``Розглядаю варіанти``
+    (LOCATION label) and its value yields any matches, we trust those
+    matches exclusively.
+
+    Special LOCATION-label rule:
+      ``Готовий працювати: Вінниця, Дистанційно``
+      → contains a city alongside ``Дистанційно``.  In-office work is the
+        priority for our pipeline, so ``Віддалена робота`` is *omitted*
+        from the result whenever the value also lists at least one city.
+        Only when the value contains *nothing but* remote indicators
+        (``Готовий працювати: Дистанційно``) do we record remote work.
+
+    The global strict-phrase pass is used only as a fallback for free-form
+    CVs without explicit labels, and is also clipped to the header portion.
+
+    Returns the detected types in canonical order, joined with ``", "``.
+    Returns an empty string when no type can be found.
+    """
+    exp_start = _find_experience_section_start(all_lines)
+    pre_exp_lines = all_lines[:exp_start]
+
+    found_label: set[str] = set()
+    had_label = False
+
+    for i, line in enumerate(pre_exp_lines):
+        match = _match_employment_label(line)
+        if match is None:
+            continue
+        kind, tail = match
+        had_label = True
+
+        value_parts: list[str] = []
+        if tail:
+            value_parts.append(tail)
+
+        collected = 0
+        for j in range(i + 1, len(pre_exp_lines)):
+            nxt = pre_exp_lines[j].strip()
+            if not nxt:
+                continue
+            cl = nxt.lower().rstrip(":")
+            if cl in _SIDE_HEADERS or cl in _SECTION_HEADERS:
+                break
+            if _match_employment_label(nxt) is not None:
+                break
+            # Stop at any other "Label: value" / "Label\tvalue" line —
+            # neighbouring fields like "Місто: Дніпро", "Вік: 22 роки",
+            # "Освіта: Дистанційне навчання" must not be merged into the
+            # employment-type value tail.
+            if _LABELED_FIELD_LINE.match(nxt):
+                break
+            value_parts.append(nxt)
+            collected += 1
+            if collected >= 4:
+                break
+
+        value_text = " | ".join(value_parts)
+        labels_in_value = _detect_employment_in(
+            value_text, _EMPLOYMENT_LABEL_VALUE_PATTERNS,
+        )
+
+        if kind == "location" and "Віддалена робота" in labels_in_value:
+            if _value_has_non_remote_location(value_text):
+                labels_in_value.discard("Віддалена робота")
+
+        found_label.update(labels_in_value)
+
+    # When the resume contained any explicit employment-type / readiness
+    # label, trust that pass exclusively — even when its filtered result is
+    # empty.  Falling through to the global pattern pass in that case would
+    # re-introduce the very ``Дистанційно`` token we just deliberately
+    # filtered out by the location-label rule (city + remote → office wins).
+    if had_label:
+        return ", ".join(t for t in _EMPLOYMENT_ORDER if t in found_label)
+
+    full_text = "\n".join(pre_exp_lines)
+    found_global = _detect_employment_in(full_text, _EMPLOYMENT_GLOBAL_PATTERNS)
+    return ", ".join(t for t in _EMPLOYMENT_ORDER if t in found_global)
+
+
 def extract_resume(path: Path) -> ResumeData:
     """
     Parse a resume file (.docx / .pdf / .mhtml) and extract structured fields.
@@ -1510,6 +1830,12 @@ def extract_resume(path: Path) -> ResumeData:
             docx_position = _position_from_filename(path.name, result.name)
         result.positions = docx_position
 
+    # --- Employment type ---
+    try:
+        result.employment_type = _extract_employment_type(all_lines)
+    except Exception as exc:
+        logger.warning("Employment type extraction failed for %s: %s", path.name, exc)
+
     # --- Work experience ---
     try:
         if suffix == ".docx":
@@ -1559,8 +1885,9 @@ def extract_resume(path: Path) -> ResumeData:
 
     exp_preview = result.work_experience.replace("\n", " | ")[:80] if result.work_experience else "—"
     logger.info(
-        "Extracted | file=%s name=%r phone=%r age=%r source=%r date=%s exp=%r",
-        path.name, result.name, result.phone, result.age, result.source,
+        "Extracted | file=%s name=%r phone=%r age=%r emp=%r source=%r date=%s exp=%r",
+        path.name, result.name, result.phone, result.age, result.employment_type,
+        result.source,
         result.publication_date.strftime("%Y-%m-%d") if result.publication_date else "—",
         exp_preview,
     )

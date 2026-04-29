@@ -16,6 +16,7 @@ COLUMNS: list[str] = [
     "ПІБ",
     "Номер телефону",
     "Вік",
+    "Вид зайнятості",
     "Посада",
     "Досвід роботи",
     "Джерело",
@@ -34,6 +35,7 @@ _MIN_COL_WIDTHS: dict[str, int] = {
     "Вік": 8,
     "Джерело": 16,
     "Номер телефону": 22,
+    "Вид зайнятості": 32,
     "Досвід роботи": 45,
 }
 
@@ -78,6 +80,7 @@ def build_excel(resumes: list[ResumeData], output_path: Path) -> None:
             resume.name,
             resume.phone,
             resume.age,
+            resume.employment_type,
             resume.positions,
             resume.work_experience,
             resume.source,
